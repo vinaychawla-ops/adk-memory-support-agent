@@ -1,5 +1,8 @@
 google-adk>=2.11.0
 pytest
+# Phase 3 HTTP service (also baked into the replica image)
+fastapi
+uvicorn
 # Phase 2 durable backends (only needed when the env selects them;
 # unit tests use fakes and integration tests run against local Docker)
 redis

@@ -1,11 +1,12 @@
 # AGENTS.md — agent-memory-support-agent
 
 ## What this repo is
-Phases 0–2 of ROADMAP.md: the video's e-commerce customer support agent
+Phases 0–3 of ROADMAP.md: the video's e-commerce customer support agent
 rebuilt as a single Google ADK `LlmAgent` on Gemini, with the four memory
 layers (session state, episodic, semantic, procedural) wired through
 ADK-native in-memory services by default and durable Docker backends
 (Redis / pgvector / Firestore / git-versioned rules) via env selection.
+Phase 3 serves it over HTTP: three identical replicas behind nginx.
 Mock Order Management System, mock customers. Runs locally; live turns
 need `GOOGLE_API_KEY`.
 
@@ -13,15 +14,17 @@ need `GOOGLE_API_KEY`.
 ```bash
 VENV=/home/hatch/workspace/.venv-adk/bin
 $VENV/python -m pytest tests/ -q        # full suite, offline, must be green
-                                       # (integration tests self-skip w/o backends)
-$VENV/python -m pytest tests/ -q -m integration   # needs: docker compose up -d
+                                       # (integration tests self-skip w/o the compose stack)
+$VENV/python -m pytest tests/ -q -m integration   # needs: docker compose up -d --build
 $VENV/python demo.py                    # offline smoke of the non-LLM parts
 export GOOGLE_API_KEY=...               # real key, never committed
 $VENV/python demo.py --live             # scripted two-session live demo
 $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
 ```
-Docker backends: `docker compose up -d` (redis :6379, pgvector :5432,
-firestore emulator :8080). Select via env:
+Docker: `docker compose up -d --build` (backends + 3 replicas + nginx LB).
+Ports on the host: 8000 = nginx (the only public entry), 6379 = redis,
+5432 = pgvector, 8080 = firestore emulator. Replicas listen on :8000
+inside the compose network only. Select backends via env:
 `SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore`
 (+ `FIRESTORE_EMULATOR_HOST=localhost:8080`, `EMBEDDER=fake|gemini`).
 
@@ -119,6 +122,21 @@ firestore emulator :8080). Select via env:
   plain dict so it stays unit-testable; `_recall_before_agent` is the thin
   ADK wrapper. Instruction is an async provider (not a `{var}` template)
   so JSON/braces in the prompt can't collide with state injection.
+- `api.py` (Phase 3): FastAPI app. `POST /chat` takes
+  `{user_id, session_id, message}` and returns `{reply, model, replica_id,
+  backends, memory_recall, events_recorded}`; `GET /health` reports
+  liveness + per-backend reachability (never raises, never needs a key).
+  One Runner per process; per-user banks/audit are registered per request
+  (both idempotent), so any replica serves any user. After each turn only
+  the *new* events are written to episodic memory, deduplicated via
+  `episodic_recorded_upto` in session state (bumped with a bookkeeping
+  event); each turn's delta is stored under `<session_id>#e<offset>` so
+  the in-memory backend (keyed by session id) can't overwrite the
+  previous turn's episode. Errors return 500 `{"error": ...}`, never a
+  traceback. `REPLICA_ID` env (default "local") identifies the replica in
+  responses -- used for the manual cross-replica drill. `create_app()`
+  takes an injectable runner factory for tests; module-level `app` is the
+  uvicorn entrypoint.
 - Tests are fully offline: `asyncio.run()` inside sync test functions (no
   pytest-asyncio dependency). FakeToolContext mirrors the ADK surface the
   tools touch (`.state`, `.session.app_name/.user_id`).
@@ -143,5 +161,14 @@ firestore emulator :8080). Select via env:
   code has no backend branches; selection is env-driven with in-memory
   defaults. The Phase-0 keyword-search hack in the recall query now only
   applies when `EPISODIC_BACKEND=memory`.
+- Phase 3 (done 2026-10-11): `support_agent/api.py` (FastAPI `/chat` +
+  `/health`), `Dockerfile` (replica image), `nginx/nginx.conf`
+  (least-conn over agent-1a/1-b/1-c), compose extended with the replicas +
+  LB (host :8000 = nginx; replicas internal only). No sticky sessions,
+  no auth (localhost). `tests/test_api.py` (7 offline tests incl. the
+  two-replica interleaving acceptance with shared services) +
+  `tests/test_phase3_integration.py` (3 offline config checks + 2 live
+  LB tests, self-skipping). p95 latency stays a manual check (needs the
+  live model + real load).
 - When adding a layer, extend the recall block and the eval scenarios,
   not the tool signatures.

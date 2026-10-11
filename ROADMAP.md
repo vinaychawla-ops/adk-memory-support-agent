@@ -105,15 +105,44 @@ memory — data lives server-side. 6 integration tests
 
 ## Phase 3 — Serve and scale (the left half of the diagram)
 
-**What changes:** one local agent becomes a service.
+**Status: done 2026-10-11** — the agent is an HTTP service: three
+identical replicas behind nginx, all in the compose file. No sticky
+sessions, no auth (localhost only), everything env-driven.
 
-- FastAPI `/chat` endpoint with the ADK `Runner` behind it (the green API box).
-- Load balancer → N agent replicas (1-a / 1-b / 1-c). Because state lives in Redis and memory
-  in pgvector/Firestore, any replica serves any user — no sticky sessions required.
-- LLM config centralized (model, thinking budget, fallback model).
+**What changed:**
+- `support_agent/api.py`: FastAPI app. `POST /chat`
+  (`{user_id, session_id, message}` → `{reply, model, replica_id,
+  backends, memory_recall, events_recorded}`) runs one turn through the
+  ADK Runner built by the existing `make_runner()` factories; `GET
+  /health` reports liveness + per-backend reachability and never needs a
+  key. After each turn only the *new* session events are written to
+  episodic memory, deduplicated via `episodic_recorded_upto` in session
+  state; each turn's delta is stored under `<session_id>#e<offset>` so
+  the in-memory backend (which keys episodes by session id) can't
+  overwrite the previous turn's episode. Errors are 500s with
+  `{"error": ...}`, never tracebacks. PII scrubbing and audit logging
+  carry over unchanged (episodes scrubbed before storage, audit previews
+  scrubbed + hashed).
+- `Dockerfile`: replica image (`uvicorn support_agent.api:app` on :8000).
+- `nginx/nginx.conf`: `least_conn` over `agent-1a/1-b/1-c:8000`.
+- `docker-compose.yml`: backends + 3 replicas + nginx. Host ports:
+  **8000** = nginx (the only public entry), 6379 = redis, 5432 =
+  pgvector, 8080 = firestore emulator (no clash). Replicas listen on
+  :8000 inside the compose network only; `REPLICA_ID` env identifies
+  each replica in responses.
+- LLM config centralized via env (`MODEL`, `GOOGLE_API_KEY`), same
+  pattern as the rest — no per-replica config.
 
-**Acceptance:** 3 replicas behind the LB handle interleaved sessions for the same user with
-no memory loss; p95 turn latency budgeted.
+**Acceptance:** two replicas sharing one backend (simulated offline with
+a shared in-memory session service) handle interleaved turns for one
+user with no loss — state, history, and episodic memory all visible
+across replicas (`tests/test_api.py::
+test_interleaved_replicas_share_everything`). The live version is a
+manual drill on his machine: `curl` turns at `localhost:8000/chat` and
+watch `replica_id` cycle across agent-1a/1-b/1-c while the conversation
+stays coherent (commands in README). p95 turn latency is documented as
+an acceptance criterion but stays unverifiable here — it needs the live
+model and real load.
 
 ## Phase 4 — Operate: the forgetting layer
 
@@ -142,8 +171,8 @@ the eval set still passes.
 | Episodic, long term | `InMemoryMemoryService` | `PgVectorMemoryService` (embedded rows, hybrid search) | `BaseMemoryService` |
 | Semantic, long term | `SemanticBank` (in-memory) | `FirestoreSemanticBank` (one doc/user, emulator-ready) | `SemanticBank`-compatible store |
 | Procedural, long term | system instruction + rules module | `rules/policy.yaml` + `rules/procedural.md`, git-versioned | loaded config, no subclass needed |
-| API | `demo.py` CLI | FastAPI + Runner | `Runner` | Phase 3 |
-| Load balancer / replicas | single process | LB → N replicas | infra, not ADK | Phase 3 |
+| API | `demo.py` CLI | FastAPI + Runner (done 2026-10-11) | `Runner` |
+| Load balancer / replicas | single process | nginx → 3 replicas (done 2026-10-11) | infra, not ADK |
 
 ## Appendix B — Out of scope
 

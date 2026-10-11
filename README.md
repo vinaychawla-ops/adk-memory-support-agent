@@ -91,6 +91,41 @@ Kill/restart drill (the roadmap's acceptance): `docker compose restart
 redis pgvector`, then re-run the integration tests — long-term memory
 must survive, because it lives server-side.
 
+## Serving (Phase 3)
+
+`docker compose up -d --build` also starts three identical agent replicas
+(Agent 1-a / 1-b / 1-c from the diagram) behind an nginx load balancer.
+Any replica serves any user — session state lives in Redis and memory in
+pgvector/Firestore, so there are no sticky sessions.
+
+Ports (host): **8000** = load balancer (the only public entry), 6379 =
+Redis, 5432 = pgvector, 8080 = Firestore emulator. Replicas listen on
+:8000 inside the compose network only.
+
+```bash
+docker compose up -d --build
+curl localhost:8000/health
+curl -X POST localhost:8000/chat -H 'Content-Type: application/json' \
+  -d '{"user_id":"maya","session_id":"s1","message":"track order ORD-1003"}'
+```
+
+Live turns need a key: `GOOGLE_API_KEY=... docker compose up -d --build`
+(without it, `/health` works and `/chat` returns a 500 naming the missing
+key — never a traceback). The response carries `replica_id` so you can
+watch turns fan out across replicas while the conversation stays coherent:
+
+```bash
+for i in 1 2 3 4 5 6; do
+  curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
+    -d '{"user_id":"maya","session_id":"s1","message":"track ORD-1003"}' \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["replica_id"], d["events_recorded"])'
+done
+```
+
+p95 turn-latency budget: documented as an acceptance criterion in
+ROADMAP.md, but not measurable here — it needs the live model and real
+load, so it stays a manual check on your machine.
+
 ## Run it
 
 ```bash
@@ -98,10 +133,10 @@ must survive, because it lives server-side.
 /home/hatch/workspace/.venv-adk/bin/pip install -r requirements.txt
 
 # full offline test suite -- no API key, no Docker needed
-# (115 unit tests; 6 integration tests self-skip without backends)
+# (125 unit tests; 8 integration tests self-skip without the compose stack)
 /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q
 
-# integration tests only (needs: docker compose up -d)
+# integration tests only (needs: docker compose up -d --build)
 /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q -m integration
 
 # eval set against the real backends (needs: docker compose up -d)
@@ -138,6 +173,7 @@ support_agent/
   rules.py         deterministic procedural rules (pure functions; thresholds from policy.yaml)
   memory_banks.py  EpisodicBank + SemanticBank (+ shared scrub_event/score_facts helpers)
   config.py        model name, app name, policy (from rules/policy.yaml), backend env config
+  api.py           Phase 3: FastAPI app -- POST /chat + GET /health over the ADK Runner
   backends/
     __init__.py           env-selected factories: make_session_service/_memory_service/_semantic_store/_embedder
     redis_sessions.py     2a: RedisSessionService (BaseSessionService, sliding TTL, PII-scrubbed)
@@ -148,11 +184,13 @@ support_agent/
 rules/
   policy.yaml      procedural policy thresholds (git-versioned source of truth)
   procedural.md    system-prompt prose (git-versioned; {refund_threshold}/{return_window_days} slots)
-tests/             115 unit tests (offline) + 12-scenario eval + 6 integration tests (marked, self-skip)
+tests/             125 unit tests (offline) + 12-scenario eval + 8 integration tests (marked, self-skip)
 demo.py            offline smoke (default) / live two-session demo (--live); --audit PATH
-docker-compose.yml redis + pgvector + firestore emulator (Phase 2 local infra)
+docker-compose.yml Phase 2 backends + Phase 3 replicas (agent-1a/b/c) + nginx LB (:8000)
+Dockerfile         agent replica image (uvicorn support_agent.api:app on :8000)
+nginx/nginx.conf   least-conn LB over the three replicas
 docs/              target-architecture.svg -- the video's Step-5 diagram, redrawn
 ```
 
 All data is mock and fictional. See [`AGENTS.md`](AGENTS.md) for working
-conventions and [`ROADMAP.md`](ROADMAP.md) for Phases 3–4.
+conventions and [`ROADMAP.md`](ROADMAP.md) for Phase 4.
