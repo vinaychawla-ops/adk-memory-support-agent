@@ -161,11 +161,11 @@ inside the compose network only. Select backends via env:
   tools touch (`.state`, `.session.app_name/.user_id`).
 - Money rule (verdicts, not execution): the agent drafts refunds above the
   threshold and escalates; it never claims to have executed one.
-- GitHub: pushed 2026-10-11 to public repo vinaychawla-ops/adk-memory-support-agent
-  (main @6679380, 20/20 files verified). Future pushes go through
-  `~/workspace/skills/github/bin/api_push.py` (git-database API; sandbox git
-  has no network). Do NOT ask for an API key; the live path reads `GOOGLE_API_KEY`
-  from the environment.
+- GitHub: public repo vinaychawla-ops/adk-memory-support-agent, all five
+  phases pushed (main @3c6aa8c, 43/43 files verified 2026-10-11). Future
+  pushes go through `~/workspace/skills/github/bin/api_push.py`
+  (git-database API; sandbox git has no network). Do NOT ask for an API
+  key; the live path reads `GOOGLE_API_KEY` from the environment.
 
 ## Phase 1+ notes (from ROADMAP.md)
 - Phase 1 (done 2026-10-11): `audit.py` JSONL event log, 12-scenario eval

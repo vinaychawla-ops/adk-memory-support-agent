@@ -2,9 +2,10 @@
 
 A Google ADK rebuild of the e-commerce customer support agent from
 *"The AI Agent Memory Architecture Explained — From State to Long-Term Memory"*
-(Applied with AI – Sanjay Kumar). Phases 0–2 of the roadmap in
+(Applied with AI – Sanjay Kumar). All five phases of the roadmap in
 [`ROADMAP.md`](ROADMAP.md) are done: one agent, four memory layers,
-durable backends in local Docker. Mock data; runs locally.
+durable backends in local Docker, served over HTTP behind a load
+balancer, with a forgetting layer. Mock data; runs locally.
 
 ## The four layers, and where each lives
 
@@ -146,12 +147,12 @@ card pattern.
 
 ```bash
 # metrics from an audit trail (+ offline retrieval-precision probes)
-/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance report \
+python -m support_agent.maintenance report \
   --audit /tmp/audit.jsonl --precision
 
 # maintenance pass -- dry-run by default, --execute to perform
-/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance run --user maya
-/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance run --user maya --execute
+python -m support_agent.maintenance run --user maya
+python -m support_agent.maintenance run --user maya --execute
 ```
 
 The `report` shows recall hit rate per layer, average memory-context
@@ -168,37 +169,40 @@ still passes. Against real backends:
 docker compose up -d --build
 SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore \
   FIRESTORE_EMULATOR_HOST=localhost:8080 \
-  /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/test_maintenance.py -q -m integration
+  python -m pytest tests/test_maintenance.py -q -m integration
 ```
 
 ## Run it
 
+All commands assume an active virtualenv (Python 3.12+) with the
+requirements installed — use your own venv's `python`/`pip`.
+
 ```bash
 # one-time setup
-/home/hatch/workspace/.venv-adk/bin/pip install -r requirements.txt
+pip install -r requirements.txt
 
 # full offline test suite -- no API key, no Docker needed
 # (147 unit tests; 9 integration tests self-skip without the compose stack)
-/home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q
+python -m pytest tests/ -q
 
 # integration tests only (needs: docker compose up -d --build)
-/home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q -m integration
+python -m pytest tests/ -q -m integration
 
 # eval set against the real backends (needs: docker compose up -d)
 SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore \
-  /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/test_eval.py -q
+  python -m pytest tests/test_eval.py -q
 
 # offline smoke test of the non-LLM parts
-/home/hatch/workspace/.venv-adk/bin/python demo.py
+python demo.py
 
 # same smoke, with the audit log written to JSONL
-/home/hatch/workspace/.venv-adk/bin/python demo.py --audit /tmp/audit.jsonl
+python demo.py --audit /tmp/audit.jsonl
 
 # live two-session demo -- needs GOOGLE_API_KEY in the environment
 export GOOGLE_API_KEY=...
-/home/hatch/workspace/.venv-adk/bin/python demo.py --live
+python demo.py --live
 # live demo with audit trail
-/home/hatch/workspace/.venv-adk/bin/python demo.py --live --audit /tmp/audit.jsonl
+python demo.py --live --audit /tmp/audit.jsonl
 ```
 
 The live demo scripts the roadmap's acceptance story: session 1, Maya
@@ -241,4 +245,4 @@ docs/              target-architecture.svg -- the video's Step-5 diagram, redraw
 ```
 
 All data is mock and fictional. See [`AGENTS.md`](AGENTS.md) for working
-conventions and [`ROADMAP.md`](ROADMAP.md) for Phase 4.
+conventions and [`ROADMAP.md`](ROADMAP.md) for the full phased roadmap.
