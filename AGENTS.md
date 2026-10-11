@@ -33,9 +33,38 @@ $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
 - `memory_banks.py`: episodic = ADK `BaseMemoryService` (raw session events,
   keyword search); semantic = `SemanticBank` fact store with upsert/supersede
   (same slot -> old fact marked superseded, kept in `history()` for audit).
-  Card-number-shaped strings are refused at the bank boundary. Banks are
-  keyed `(app_name, user_id)` in a module registry -- never shared across
-  users; `clear_registry()` is tests-only.
+  Card-number-shaped strings are refused at the semantic boundary
+  (`CARD_RE`, imported from `audit.py` -- single source of truth) and
+  scrubbed from episodes in `EpisodicBank.record_session` before storage;
+  the original session object is never mutated. Banks are keyed
+  `(app_name, user_id)` in a module registry -- never shared across users;
+  `clear_registry()` is tests-only.
+- `audit.py`: stdlib-only `AuditLog` (in-memory `events` + optional JSONL),
+  per-user registry mirroring the banks (`register_audit`/`get_audit`,
+  `clear_audit_registry()` tests-only). `log_turn`/`log_tool_call`/
+  `log_tool_result`/`log_memory_write`/`log_rule_fired`/`log_memory_recall`
+  are no-ops when no log is registered -- zero overhead by default.
+  Prompts/args stored as scrubbed preview + SHA-256 hash of the scrubbed
+  text; card numbers redacted to `[REDACTED]` before storage. `replay()`
+  re-reads the JSONL to prove the trail is complete and ordered.
+- Audit wiring: `_recall_before_agent` logs the `turn`; `ensure_memory_recall`
+  logs `memory_recall`; `_audit_before_tool`/`_audit_after_tool` log every
+  tool invocation/outcome (they never block -- always return None).
+  `request_refund`/`start_return` log `rule_fired`; `remember_fact` logs
+  the semantic write; `EpisodicBank.record_session` logs the episodic write
+  (with `pii_redacted` flag). A logging failure must never break the agent
+  loop -- keep the helpers total and side-effect-free beyond the log.
+- Recall query: `_recall_before_agent` appends stable domain terms
+  ("customer preferences past orders") to the user's latest message before
+  `ensure_memory_recall`. Phase-0 search is keyword-based, so without this
+  a message like "I want a refund" would never surface the contact
+  preference. Phase 2 replaces this with vector search; until then, extend
+  the domain terms rather than the tool signatures.
+- Eval: `tests/test_eval.py` holds the 12 scripted scenarios -- each reads
+  as a customer story and asserts memory behavior (recall / rule fired /
+  fact superseded). Extend it when adding a layer or a rule; the
+  `test_eval_audit_replays_full_multisession_story` test pins the exact
+  16-event audit sequence, so update it deliberately when the wiring changes.
 - Session state discipline: tools write STRUCTURED state only
   (`active_order_id`, `return_in_progress`, `memory_context`,
   `memory_recall_done`). History comes from session events, not state.
@@ -50,14 +79,20 @@ $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
   tools touch (`.state`, `.session.app_name/.user_id`).
 - Money rule (verdicts, not execution): the agent drafts refunds above the
   threshold and escalates; it never claims to have executed one.
-- Do NOT push to GitHub or create any repo -- the user confirms before any
-  push. Do NOT ask for an API key; the live path reads `GOOGLE_API_KEY`
+- GitHub: pushed 2026-10-11 to public repo vinaychawla-ops/adk-memory-support-agent
+  (main @6679380, 20/20 files verified). Future pushes go through
+  `~/workspace/skills/github/bin/api_push.py` (git-database API; sandbox git
+  has no network). Do NOT ask for an API key; the live path reads `GOOGLE_API_KEY`
   from the environment.
 
 ## Phase 1+ notes (from ROADMAP.md)
-- `audit.py` JSONL event log comes in Phase 1 (established pattern:
-  truncated preview + SHA-256 hash, never credentials).
+- Phase 1 (done 2026-10-11): `audit.py` JSONL event log, 12-scenario eval
+  set (`tests/test_eval.py`), conflict handling verified (upsert->supersede
+  ->history; newer preference wins), PII guardrail extended to episodes
+  (scrubbed on write) and audit previews.
 - Phase 2 swaps each in-memory service for the video's store behind the
   same ADK seams; agent code must not change to accommodate a backend.
+  The audit callbacks resolve logs from the session, so they survive the
+  swap untouched.
 - When adding a layer, extend the recall block and the eval scenarios,
   not the tool signatures.

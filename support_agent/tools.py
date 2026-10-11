@@ -18,9 +18,23 @@ from typing import Any
 from google.adk.tools import FunctionTool, ToolContext
 
 from support_agent import config, fixtures, rules
+from support_agent.audit import log_memory_write, log_rule_fired
 from support_agent.memory_banks import get_banks
 
 _ORDER_ID_RE = re.compile(r"^ORD-\d{4}$")
+
+
+def _audit_ids(tool_context) -> tuple[str, str, str | None]:
+    """(app_name, user_id, session_id) from a ToolContext, defensively."""
+    try:
+        session = tool_context.session
+        return (
+            session.app_name,
+            session.user_id,
+            getattr(session, "id", None),
+        )
+    except Exception:
+        return "", "", None
 
 
 def _banks_or_error(tool_context: ToolContext) -> tuple[Any | None, dict | None]:
@@ -83,6 +97,21 @@ def start_return(order_id: str, reason: str, tool_context: ToolContext) -> dict:
     if order is None:
         return {"error": f"No order found with id {order_id!r}."}
     verdict = rules.check_return_eligibility(order)
+    app_name, user_id, session_id = _audit_ids(tool_context)
+    if verdict.get("error"):
+        decision = "error"
+    elif verdict.get("eligible"):
+        decision = "eligible"
+    else:
+        decision = "ineligible"
+    log_rule_fired(
+        app_name,
+        user_id,
+        session_id,
+        "return_eligibility",
+        decision,
+        verdict.get("reason", verdict.get("error", "")),
+    )
     if verdict.get("error") or not verdict.get("eligible"):
         return {
             "error": "Return not eligible.",
@@ -124,8 +153,21 @@ def request_refund(
         return {"error": "amount must be a number"}
 
     verdict = rules.evaluate_refund_request(amount, order)
+    app_name, user_id, session_id = _audit_ids(tool_context)
     if verdict.get("error"):
+        log_rule_fired(
+            app_name, user_id, session_id,
+            "refund_approval", "error", verdict.get("error", ""),
+        )
         return verdict
+    log_rule_fired(
+        app_name,
+        user_id,
+        session_id,
+        "refund_approval",
+        verdict["decision"],
+        verdict["reason"],
+    )
 
     if verdict["decision"] == "approve":
         credit_id = fixtures.new_credit_id()
@@ -175,7 +217,20 @@ def remember_fact(fact: str, slot: str, tool_context: ToolContext) -> dict:
     banks, err = _banks_or_error(tool_context)
     if err:
         return err
-    return banks.semantic.upsert(slot=slot, text=fact)
+    result = banks.semantic.upsert(slot=slot, text=fact)
+    app_name, user_id, _ = _audit_ids(tool_context)
+    log_memory_write(
+        app_name,
+        user_id,
+        "semantic",
+        {
+            "slot": slot,
+            "stored": result.get("stored", False),
+            "superseded": result.get("superseded", False),
+            "error": result.get("error"),
+        },
+    )
+    return result
 
 
 async def recall_memories(query: str, tool_context: ToolContext) -> dict:

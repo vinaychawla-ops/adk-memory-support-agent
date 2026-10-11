@@ -27,6 +27,12 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.memory import InMemoryMemoryService
 
 from support_agent import config, tools as tool_module
+from support_agent.audit import (
+    log_memory_recall,
+    log_tool_call,
+    log_tool_result,
+    log_turn,
+)
 from support_agent.memory_banks import get_banks, register_banks
 
 SYSTEM_PROMPT_BASE = """\
@@ -91,6 +97,7 @@ async def ensure_memory_recall(
     app_name: str,
     user_id: str,
     query: str,
+    session_id: str | None = None,
 ) -> None:
     """Populate state["memory_context"] once per session (idempotent).
 
@@ -103,19 +110,71 @@ async def ensure_memory_recall(
     block = await banks.build_recall_block(query) if banks else ""
     state["memory_context"] = block
     state["memory_recall_done"] = True
+    log_memory_recall(app_name, user_id, session_id, bool(block), len(block))
+
+
+def _session_ids(ctx) -> tuple[str, str, str | None]:
+    """(app_name, user_id, session_id) from a callback context, defensively."""
+    try:
+        session = ctx.session
+        return (
+            session.app_name,
+            session.user_id,
+            getattr(session, "id", None),
+        )
+    except Exception:
+        return "", "", None
 
 
 async def _recall_before_agent(ctx: CallbackContext) -> None:
-    """before_agent_callback: inject long-term memory at session start."""
-    query = _latest_user_text(ctx) or "customer preferences past orders returns"
+    """before_agent_callback: log the turn, then inject long-term memory.
+
+    The recall query is the user's latest message *plus* stable domain
+    terms ("customer preferences past orders"). Keyword search (Phase 0)
+    only matches on word overlap, so without the domain terms a message
+    like "I want a refund" would never surface the customer's contact
+    preference. The extra terms bias recall toward what a support agent
+    should always surface; Phase 2 replaces this with vector search.
+    """
+    app_name, user_id, session_id = _session_ids(ctx)
+    user_text = _latest_user_text(ctx)
+    log_turn(app_name, user_id, session_id, user_text)
+    query = f"{user_text} customer preferences past orders".strip()
     await ensure_memory_recall(
-        ctx.state, ctx.session.app_name, ctx.session.user_id, query
+        ctx.state, app_name, user_id, query, session_id=session_id
     )
     return None
 
 
+async def _audit_before_tool(tool, args: dict, tool_context) -> None:
+    """before_tool_callback: log the invocation. Always returns None so the
+    tool runs -- this callback never blocks, it only observes."""
+    app_name, user_id, session_id = _session_ids(tool_context)
+    try:
+        name = getattr(tool, "name", repr(tool))
+    except Exception:
+        name = "unknown"
+    log_tool_call(app_name, user_id, session_id, name, args or {})
+    return None
+
+
+async def _audit_after_tool(tool, args: dict, tool_context, tool_response: dict) -> None:
+    """after_tool_callback: log the outcome (ok/error + preview)."""
+    app_name, user_id, session_id = _session_ids(tool_context)
+    try:
+        name = getattr(tool, "name", repr(tool))
+    except Exception:
+        name = "unknown"
+    log_tool_result(app_name, user_id, session_id, name, tool_response or {})
+    return None
+
+
 def build_agent() -> LlmAgent:
-    """Construct the agent. Needs no API key -- only running it does."""
+    """Construct the agent. Needs no API key -- only running it does.
+
+    Tool callbacks are attached unconditionally but only observe: with no
+    AuditLog registered for the user they are no-ops (zero overhead).
+    """
     return LlmAgent(
         name="support_agent",
         model=config.MODEL,
@@ -123,6 +182,8 @@ def build_agent() -> LlmAgent:
         instruction=_instruction_provider,
         tools=tool_module.build_tools(),
         before_agent_callback=_recall_before_agent,
+        before_tool_callback=_audit_before_tool,
+        after_tool_callback=_audit_after_tool,
     )
 
 

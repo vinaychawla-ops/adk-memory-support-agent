@@ -1,14 +1,15 @@
 """demo.py -- offline smoke test (default) or live two-session demo (--live).
 
 Offline (no key needed):
-    python demo.py
+    python demo.py [--audit PATH]
 Exercises the non-LLM parts end to end: tools, rules, semantic
 upsert/supersede, session-state wiring, episodic record/recall, and
 verifies the live-loop pieces (LlmAgent, Runner, services) construct
-correctly.
+correctly. With --audit PATH, every turn, tool call, memory write, rule
+firing, and recall is also logged to PATH as JSONL.
 
 Live (needs GOOGLE_API_KEY in the environment):
-    python demo.py --live
+    python demo.py --live [--audit PATH]
 Scripted two-session story against Gemini:
   session 1: Maya reports ORD-1001 arrived 5 days late -> $10 goodwill
              credit; she asks for email updates -> preference remembered.
@@ -32,6 +33,7 @@ from google.genai import types
 from support_agent import agent as agent_module
 from support_agent import config, fixtures, rules
 from support_agent import tools as tool_module
+from support_agent.audit import clear_audit_registry, register_audit
 from support_agent.memory_banks import (
     MemoryBanks,
     clear_registry,
@@ -40,6 +42,30 @@ from support_agent.memory_banks import (
 )
 
 FAILURES: list[str] = []
+
+
+def audit_path_arg() -> str | None:
+    """--audit PATH anywhere in argv; the next token is the path."""
+    if "--audit" in sys.argv:
+        i = sys.argv.index("--audit")
+        if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("--"):
+            return sys.argv[i + 1]
+    return None
+
+
+def print_audit_summary() -> None:
+    from support_agent.audit import get_audit
+
+    log = get_audit("test_app", "test_user") or get_audit(config.APP_NAME, "maya")
+    if log is None:
+        return
+    print("== audit ==")
+    summary = log.summary()
+    print(f"  events: {summary['total']}")
+    for event, count in sorted(summary["by_event"].items()):
+        print(f"    {event}: {count}")
+    if log.path:
+        print(f"  JSONL: {log.path}")
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
@@ -70,11 +96,15 @@ def _event(author: str, text: str) -> Event:
     )
 
 
-def offline_smoke() -> int:
+def offline_smoke(audit_path: str | None = None) -> int:
     from google.adk.memory import InMemoryMemoryService
 
     print("== offline smoke: tools ==")
     clear_registry()
+    clear_audit_registry()
+    if audit_path:
+        register_audit("test_app", "test_user", path=audit_path)
+        print(f"  (audit log -> {audit_path})")
     fixtures.reset_counters()
     ctx = _FakeToolContext()
 
@@ -165,6 +195,10 @@ def offline_smoke() -> int:
     check("recall block carries semantic fact", has_fact)
     check("recall runs once per session", idempotent)
 
+    res = tool_module.remember_fact("prefers carrier pigeon", "contact_preference", ctx)
+    check("remember_fact tool stores + supersedes",
+          res.get("stored") is True and res.get("superseded") is True)
+
     print("== offline smoke: live-loop construction (no key) ==")
     try:
         ag = agent_module.build_agent()
@@ -179,6 +213,9 @@ def offline_smoke() -> int:
         check("agent + Runner construct without key", False, repr(e))
 
     print()
+    if audit_path:
+        print_audit_summary()
+        print()
     if FAILURES:
         print(f"OFFLINE SMOKE: {len(FAILURES)} FAILURES: {FAILURES}")
         return 1
@@ -203,12 +240,16 @@ async def _turn(runner, user_id: str, session_id: str, text: str) -> str:
     return final.strip()
 
 
-async def live_demo() -> int:
+async def live_demo(audit_path: str | None = None) -> int:
     if not os.environ.get("GOOGLE_API_KEY"):
         print("Set GOOGLE_API_KEY in the environment to run the live demo.")
         return 2
 
     user_id = "maya"
+    if audit_path:
+        clear_audit_registry()
+        register_audit(config.APP_NAME, user_id, path=audit_path)
+        print(f"(audit log -> {audit_path})")
     runner, session_service, memory_service, agent = agent_module.make_runner(user_id)
     banks = get_banks(config.APP_NAME, user_id)
     assert banks is not None
@@ -254,13 +295,17 @@ async def live_demo() -> int:
     print(f"  - reply references the email preference: {'email' in lowered}")
     print(f"  - reply does NOT claim the $75 refund was executed: "
           f"{'draft' in lowered or 'supervisor' in lowered or 'approval' in lowered}")
+    if audit_path:
+        print()
+        print_audit_summary()
     return 0
 
 
 def main() -> int:
+    audit_path = audit_path_arg()
     if "--live" in sys.argv:
-        return asyncio.run(live_demo())
-    return offline_smoke()
+        return asyncio.run(live_demo(audit_path))
+    return offline_smoke(audit_path)
 
 
 if __name__ == "__main__":

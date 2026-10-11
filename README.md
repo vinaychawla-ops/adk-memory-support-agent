@@ -28,6 +28,35 @@ Policy, enforced deterministically in `rules.py`: refunds/credits at or
 below **$50** may be issued; anything above is **drafted and escalated to
 a human — never auto-executed**. Returns only within 30 days of delivery.
 
+## Audit log (Phase 1)
+
+`support_agent/audit.py` — every turn, tool call, memory write
+(episodic + semantic), procedural rule firing, and memory recall is
+logged to an `AuditLog`: in-memory events plus an optional JSONL file.
+This is the durable, on-disk episodic record.
+
+- Prompts are stored as a truncated preview + SHA-256 hash, never the
+  full text. Card-number-shaped strings are redacted to `[REDACTED]`
+  *before* anything is stored — they can't reach any memory layer,
+  including this log.
+- Wired through ADK callbacks (`before_agent_callback`,
+  `before/after_tool_callback`) plus the tool call sites; with no log
+  registered the callbacks are no-ops (zero overhead).
+- `AuditLog.replay()` re-reads the JSONL file, proving the on-disk
+  trail replays the story the agent saw.
+
+## Eval set (Phase 1)
+
+`tests/test_eval.py` — 12 scripted support scenarios, each asserting
+expected memory behavior, all offline: preference recall across
+sessions, conflicting preferences superseding (not appending),
+card-number PII never entering any layer, episodic record/recall
+round-trip, session state across turns, the $50.00/$50.01 refund
+boundary, escalation triggers, the 30-day return window, the
+late-delivery goodwill credit, recall injection into the prompt, PII
+scrubbing in audit previews, and a full multi-session story whose
+16-event audit trail replays in exact order from the JSONL file.
+
 ## Run it
 
 ```bash
@@ -41,9 +70,14 @@ a human — never auto-executed**. Returns only within 30 days of delivery.
 # offline smoke test of the non-LLM parts
 /home/hatch/workspace/.venv-adk/bin/python demo.py
 
+# same smoke, with the audit log written to JSONL
+/home/hatch/workspace/.venv-adk/bin/python demo.py --audit /tmp/audit.jsonl
+
 # live two-session demo -- needs GOOGLE_API_KEY in the environment
 export GOOGLE_API_KEY=...
 /home/hatch/workspace/.venv-adk/bin/python demo.py --live
+# live demo with audit trail
+/home/hatch/workspace/.venv-adk/bin/python demo.py --live --audit /tmp/audit.jsonl
 ```
 
 The live demo scripts the roadmap's acceptance story: session 1, Maya
@@ -57,14 +91,15 @@ not executed.
 
 ```
 support_agent/
-  agent.py         LlmAgent, instruction provider, recall callback, make_runner()
+  agent.py         LlmAgent, instruction provider, recall + audit callbacks, make_runner()
+  audit.py         AuditLog (in-memory + JSONL), PII scrubbing, per-user registry
   tools.py         mock OMS tools + remember_fact/recall_memories (FunctionTools)
   rules.py         deterministic procedural rules (pure functions)
-  memory_banks.py  EpisodicBank (ADK memory service) + SemanticBank (fact store)
+  memory_banks.py  EpisodicBank (ADK memory service, PII-scrubbed) + SemanticBank (fact store)
   fixtures.py      mock customers/orders/policies -- all fictional, no real PII
   config.py        model name, app name, all policy thresholds
-tests/             pytest suite, fully offline (41 tests)
-demo.py            offline smoke (default) / live two-session demo (--live)
+tests/             pytest suite, fully offline (67 tests: unit + 12-scenario eval)
+demo.py            offline smoke (default) / live two-session demo (--live); --audit PATH
 docs/              target-architecture.svg -- the video's Step-5 diagram, redrawn
 ```
 

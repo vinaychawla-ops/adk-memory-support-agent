@@ -20,14 +20,19 @@ tool_context.session, so no global user state leaks across users.
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from support_agent import config
+from google.genai import types
 
-# Card-number-shaped strings must never enter any memory layer.
-_PII_RE = re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b")
+from support_agent import config
+from support_agent.audit import CARD_RE, log_memory_write, scrub_pii
+
+# Card-number-shaped strings must never enter any memory layer. The regex
+# lives in audit.py (single source of truth); episodes are scrubbed on
+# write and the audit log itself redacts previews.
 
 
 def _stem(word: str) -> str:
@@ -74,7 +79,7 @@ class SemanticBank:
         text = (text or "").strip()
         if not slot or not text:
             return {"error": "slot and text are both required"}
-        if _PII_RE.search(text):
+        if CARD_RE.search(text):
             return {
                 "error": "Refused: text looks like it contains a card number. "
                 "Card numbers must never enter memory."
@@ -126,16 +131,73 @@ class SemanticBank:
 
 
 class EpisodicBank:
-    """Past interactions, via ADK's memory service (raw session events)."""
+    """Past interactions, via ADK's memory service (raw session events).
+
+    Card-number-shaped strings are scrubbed from event text *before*
+    storage, so PII can never enter this layer either. The audit event
+    records whether any redaction happened.
+    """
 
     def __init__(self, memory_service, app_name: str, user_id: str) -> None:
         self._service = memory_service
         self._app_name = app_name
         self._user_id = user_id
 
+    @staticmethod
+    def _scrub_event(event):
+        """Return the event with card numbers redacted from text parts."""
+        content = getattr(event, "content", None)
+        parts = getattr(content, "parts", None) if content else None
+        if not parts:
+            return event, False
+        changed = False
+        new_parts = []
+        for part in parts:
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and CARD_RE.search(text):
+                new_parts.append(types.Part(text=scrub_pii(text)))
+                changed = True
+            else:
+                new_parts.append(part)
+        if not changed:
+            return event, False
+        scrubbed = copy.deepcopy(event)
+        scrubbed.content = types.Content(
+            role=getattr(content, "role", None), parts=new_parts
+        )
+        return scrubbed, True
+
     async def record_session(self, session) -> None:
-        """Store a finished session's events as one episode."""
-        await self._service.add_session_to_memory(session)
+        """Store a finished session's events as one episode.
+
+        Events are PII-scrubbed first; the original session is untouched.
+        """
+        from google.adk.sessions import Session
+
+        events = []
+        redacted = False
+        for event in session.events or []:
+            scrubbed, hit = self._scrub_event(event)
+            events.append(scrubbed)
+            redacted = redacted or hit
+        clean = Session(
+            app_name=session.app_name,
+            user_id=session.user_id,
+            id=session.id,
+            state=dict(session.state or {}),
+            events=events,
+        )
+        await self._service.add_session_to_memory(clean)
+        log_memory_write(
+            self._app_name,
+            self._user_id,
+            "episodic",
+            {
+                "session_id": session.id,
+                "events": len(events),
+                "pii_redacted": redacted,
+            },
+        )
 
     async def recall(self, query: str, limit: int = config.MAX_EPISODIC_HITS) -> list[str]:
         """Keyword search over past episodes -> short human-readable lines."""
