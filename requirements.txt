@@ -1,2 +1,7 @@
 google-adk>=2.11.0
 pytest
+# Phase 2 durable backends (only needed when the env selects them;
+# unit tests use fakes and integration tests run against local Docker)
+redis
+psycopg[binary]
+google-cloud-firestore

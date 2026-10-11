@@ -23,8 +23,6 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
-from google.adk.memory import InMemoryMemoryService
 
 from support_agent import config, tools as tool_module
 from support_agent.audit import (
@@ -33,37 +31,18 @@ from support_agent.audit import (
     log_tool_result,
     log_turn,
 )
+from support_agent.backends import (
+    make_memory_service,
+    make_semantic_store,
+    make_session_service,
+)
+from support_agent.backends import git_rules
 from support_agent.memory_banks import get_banks, register_banks
 
-SYSTEM_PROMPT_BASE = """\
-You are a customer support agent for an online store. Be warm, concise, \
-and precise. Never invent order details -- always use the tools.
-
-MEMORY DISCIPLINE (this is how you remember):
-- A MEMORY block may appear below with durable customer facts and relevant \
-past interactions. Trust it; do not ask the customer to repeat what it states.
-- When the customer states a durable preference (contact channel, shipping \
-preference, etc.), store it with remember_fact using a short slot name like \
-"contact_preference".
-- The active order and any in-progress return are tracked in session state \
-by the tools; rely on that, not on re-reading the chat.
-
-PROCEDURAL RULES (always apply, no exceptions):
-- Refunds or credits of $%.2f or less may be issued through request_refund.
-- Anything above $%.2f: request_refund will DRAFT the request and escalate \
-it. Present the draft to the customer and confirm a human supervisor will \
-review it. NEVER claim a large refund was executed.
-- Returns are only eligible within %d days of delivery; otherwise escalate.
-- Escalate to a human when: the customer threatens legal/regulatory action, \
-this is their 3rd+ contact about the same issue, or you cannot resolve it \
-with your tools. Summarize the situation when you escalate.
-- For late deliveries, offer the goodwill credit the rules compute; keep \
-the tone apologetic but brief.
-""" % (
-    config.REFUND_APPROVAL_THRESHOLD,
-    config.REFUND_APPROVAL_THRESHOLD,
-    config.RETURN_WINDOW_DAYS,
-)
+# Procedural memory, versioned in git: rules/procedural.md is the prose
+# source of truth, rendered with the validated thresholds from
+# rules/policy.yaml so prompt and deterministic rules cannot drift apart.
+SYSTEM_PROMPT_BASE = git_rules.render_system_prompt(config.POLICY)
 
 
 async def _instruction_provider(ctx: ReadonlyContext) -> str:
@@ -129,17 +108,21 @@ def _session_ids(ctx) -> tuple[str, str, str | None]:
 async def _recall_before_agent(ctx: CallbackContext) -> None:
     """before_agent_callback: log the turn, then inject long-term memory.
 
-    The recall query is the user's latest message *plus* stable domain
-    terms ("customer preferences past orders"). Keyword search (Phase 0)
-    only matches on word overlap, so without the domain terms a message
-    like "I want a refund" would never surface the customer's contact
-    preference. The extra terms bias recall toward what a support agent
-    should always surface; Phase 2 replaces this with vector search.
+    The recall query is the user's latest message. On the in-memory
+    backend (keyword search) stable domain terms ("customer preferences
+    past orders") are appended, because keyword search only matches on word
+    overlap -- without them a message like "I want a refund" would never
+    surface the customer's contact preference. With EPISODIC_BACKEND=
+    pgvector the query goes to vector search, which needs no such crutch,
+    so the raw user text is used.
     """
     app_name, user_id, session_id = _session_ids(ctx)
     user_text = _latest_user_text(ctx)
     log_turn(app_name, user_id, session_id, user_text)
-    query = f"{user_text} customer preferences past orders".strip()
+    if config.EPISODIC_BACKEND == "memory":
+        query = f"{user_text} customer preferences past orders".strip()
+    else:
+        query = user_text
     await ensure_memory_recall(
         ctx.state, app_name, user_id, query, session_id=session_id
     )
@@ -187,22 +170,27 @@ def build_agent() -> LlmAgent:
     )
 
 
-def init_user_memory(app_name: str, user_id: str, memory_service) -> None:
+def init_user_memory(app_name: str, user_id: str, memory_service, semantic_store=None) -> None:
     """Register the episodic+semantic banks for a user (idempotent).
 
     Must be called once per user before the agent serves them, so tools
-    and the recall callback can find the banks.
+    and the recall callback can find the banks. The semantic store
+    defaults to make_semantic_store() (env-selected backend).
     """
-    register_banks(app_name, user_id, memory_service)
+    if semantic_store is None:
+        semantic_store = make_semantic_store(app_name, user_id)
+    register_banks(app_name, user_id, memory_service, semantic=semantic_store)
 
 
 def make_runner(user_id: str | None = None):
     """Build (runner, session_service, memory_service, agent).
 
-    If user_id is given, its memory banks are registered immediately.
+    Services come from the backend factories (env-selected; in-memory by
+    default, so zero infra still works). If user_id is given, its memory
+    banks are registered immediately.
     """
-    session_service = InMemorySessionService()
-    memory_service = InMemoryMemoryService()
+    session_service = make_session_service()
+    memory_service = make_memory_service()
     agent = build_agent()
     if user_id is not None:
         init_user_memory(config.APP_NAME, user_id, memory_service)

@@ -48,6 +48,61 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _today_iso() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def scrub_event(event):
+    """Return (event, changed) with card numbers redacted from text parts.
+
+    Module-level so the Redis session service and the pgvector service can
+    reuse the exact same scrub before anything hits a backend. Never
+    mutates the input event.
+    """
+    content = getattr(event, "content", None)
+    parts = getattr(content, "parts", None) if content else None
+    if not parts:
+        return event, False
+    changed = False
+    new_parts = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if isinstance(text, str) and CARD_RE.search(text):
+            new_parts.append(types.Part(text=scrub_pii(text)))
+            changed = True
+        else:
+            new_parts.append(part)
+    if not changed:
+        return event, False
+    scrubbed = copy.deepcopy(event)
+    scrubbed.content = types.Content(
+        role=getattr(content, "role", None), parts=new_parts
+    )
+    return scrubbed, True
+
+
+def score_facts(facts: list["Fact"], query: str, limit: int) -> list["Fact"]:
+    """Shared keyword scoring over active facts (SemanticBank + Firestore).
+
+    Matches on stemmed tokens so "preferences" finds "prefers".
+    """
+    words = {_stem(w) for w in re.findall(r"\w+", query or "") if len(w) > 2}
+
+    def _matches(fact: "Fact") -> int:
+        tokens = re.findall(r"\w+", f"{fact.slot} {fact.text}".lower())
+        score = 0
+        for q in words:
+            if any(q in t or t in q for t in tokens):
+                score += 1
+        return score
+
+    scored = [(_matches(f), f) for f in facts if f.active]
+    if words:
+        scored = [(s, f) for s, f in scored if s]
+    scored.sort(key=lambda s: (-s[0], s[1].created_at))
+    return [f for _, f in scored[:limit]]
+
+
 @dataclass
 class Fact:
     """One semantic fact: a durable, slot-scoped statement about the customer."""
@@ -58,10 +113,15 @@ class Fact:
     created_at: str = field(default_factory=_utcnow)
     updated_at: str = field(default_factory=_utcnow)
     superseded_by: str | None = None  # text of the newer fact, if superseded
+    expires: str | None = None  # optional ISO date; expired facts stop surfacing
 
     @property
     def active(self) -> bool:
-        return self.superseded_by is None
+        if self.superseded_by is not None:
+            return False
+        if self.expires and self.expires <= _today_iso():
+            return False
+        return True
 
 
 class SemanticBank:
@@ -113,21 +173,7 @@ class SemanticBank:
 
         Matches on stemmed tokens so "preferences" finds "prefers".
         """
-        words = {_stem(w) for w in re.findall(r"\w+", query or "") if len(w) > 2}
-
-        def _matches(fact: Fact) -> int:
-            tokens = re.findall(r"\w+", f"{fact.slot} {fact.text}".lower())
-            score = 0
-            for q in words:
-                if any(q in t or t in q for t in tokens):
-                    score += 1
-            return score
-
-        scored = [(_matches(f), f) for f in self.active_facts()]
-        if words:
-            scored = [(s, f) for s, f in scored if s]
-        scored.sort(key=lambda s: (-s[0], s[1].created_at))
-        return [f for _, f in scored[:limit]]
+        return score_facts(self.active_facts(), query, limit)
 
 
 class EpisodicBank:
@@ -146,26 +192,7 @@ class EpisodicBank:
     @staticmethod
     def _scrub_event(event):
         """Return the event with card numbers redacted from text parts."""
-        content = getattr(event, "content", None)
-        parts = getattr(content, "parts", None) if content else None
-        if not parts:
-            return event, False
-        changed = False
-        new_parts = []
-        for part in parts:
-            text = getattr(part, "text", None)
-            if isinstance(text, str) and CARD_RE.search(text):
-                new_parts.append(types.Part(text=scrub_pii(text)))
-                changed = True
-            else:
-                new_parts.append(part)
-        if not changed:
-            return event, False
-        scrubbed = copy.deepcopy(event)
-        scrubbed.content = types.Content(
-            role=getattr(content, "role", None), parts=new_parts
-        )
-        return scrubbed, True
+        return scrub_event(event)
 
     async def record_session(self, session) -> None:
         """Store a finished session's events as one episode.
@@ -219,11 +246,16 @@ class EpisodicBank:
 
 
 class MemoryBanks:
-    """Both long-term banks for one (app_name, user_id)."""
+    """Both long-term banks for one (app_name, user_id).
 
-    def __init__(self, memory_service, app_name: str, user_id: str) -> None:
+    The semantic store is injectable (SemanticBank by default,
+    FirestoreSemanticBank when SEMANTIC_BACKEND=firestore) -- same public
+    contract, so nothing else changes.
+    """
+
+    def __init__(self, memory_service, app_name: str, user_id: str, semantic=None) -> None:
         self.episodic = EpisodicBank(memory_service, app_name, user_id)
-        self.semantic = SemanticBank()
+        self.semantic = semantic if semantic is not None else SemanticBank()
         self.app_name = app_name
         self.user_id = user_id
 
@@ -255,12 +287,14 @@ class MemoryBanks:
 _REGISTRY: dict[tuple[str, str], MemoryBanks] = {}
 
 
-def register_banks(app_name: str, user_id: str, memory_service) -> MemoryBanks:
+def register_banks(
+    app_name: str, user_id: str, memory_service, semantic=None
+) -> MemoryBanks:
     """Create (or return the existing) banks for a user. Idempotent."""
     key = (app_name, user_id)
     banks = _REGISTRY.get(key)
     if banks is None:
-        banks = MemoryBanks(memory_service, app_name, user_id)
+        banks = MemoryBanks(memory_service, app_name, user_id, semantic=semantic)
         _REGISTRY[key] = banks
     return banks
 

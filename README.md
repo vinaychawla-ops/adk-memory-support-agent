@@ -2,18 +2,23 @@
 
 A Google ADK rebuild of the e-commerce customer support agent from
 *"The AI Agent Memory Architecture Explained — From State to Long-Term Memory"*
-(Applied with AI – Sanjay Kumar). Phase 0 of the roadmap in
-[`ROADMAP.md`](ROADMAP.md): one agent, zero infrastructure, ADK-native
-services, mock data. Runs locally.
+(Applied with AI – Sanjay Kumar). Phases 0–2 of the roadmap in
+[`ROADMAP.md`](ROADMAP.md) are done: one agent, four memory layers,
+durable backends in local Docker. Mock data; runs locally.
 
 ## The four layers, and where each lives
 
-| Video layer | What it holds | Where it lives here |
-|---|---|---|
-| Conversation history & session state | Structured execution state: `active_order_id`, `return_in_progress`, `memory_context` — never raw transcript | ADK `InMemorySessionService` (`Session.state`); tools write it |
-| Episodic memory | What happened in past interactions (session events) | ADK `InMemoryMemoryService` via `EpisodicBank.record_session()` / `.recall()` |
-| Semantic memory | Durable customer facts/preferences with upsert + supersede | `SemanticBank` in `support_agent/memory_banks.py` (in-memory; Phase 2c → Firestore) |
-| Procedural memory | How the agent must behave: tone, refund thresholds, escalation | System instruction in `support_agent/agent.py` + deterministic `support_agent/rules.py` |
+| Video layer | What it holds | Phase 0–1 (zero infra) | Phase 2 (Docker) |
+|---|---|---|---|
+| Conversation history & session state | Structured execution state: `active_order_id`, `return_in_progress`, `memory_context` — never raw transcript | ADK `InMemorySessionService` (`Session.state`); tools write it | `RedisSessionService` — JSON sessions with sliding TTL; any replica serves any session |
+| Episodic memory | What happened in past interactions (session events) | ADK `InMemoryMemoryService` via `EpisodicBank` | `PgVectorMemoryService` — one embedded row per event, vector-ranked recall (replaces the keyword search) |
+| Semantic memory | Durable customer facts/preferences with upsert + supersede | `SemanticBank` (in-memory) | `FirestoreSemanticBank` — one document per user, `{fact, confidence, supersedes, expires}` |
+| Procedural memory | How the agent must behave: tone, refund thresholds, escalation | System instruction + deterministic `rules.py` | `rules/policy.yaml` (validated thresholds) + `rules/procedural.md`, versioned in git — the commit history is the audit trail |
+
+Backend selection is env-driven (`SESSION_BACKEND`, `EPISODIC_BACKEND`,
+`SEMANTIC_BACKEND`, `EMBEDDER`); defaults keep everything in-memory, so
+zero-infra runs still work. The agent code never changes to accommodate a
+backend — ADK's service interfaces are the seam.
 
 The recall flow: `before_agent_callback` calls `search_memory` once per
 session, builds a recall block (facts + relevant episodes), and stores it
@@ -24,9 +29,10 @@ the episode. Tools: a mock Order Management System
 `request_refund`, `escalate_to_human`) plus `remember_fact` /
 `recall_memories`.
 
-Policy, enforced deterministically in `rules.py`: refunds/credits at or
-below **$50** may be issued; anything above is **drafted and escalated to
-a human — never auto-executed**. Returns only within 30 days of delivery.
+Policy, enforced deterministically in `rules.py` (thresholds from
+`rules/policy.yaml`): refunds/credits at or below **$50** may be issued;
+anything above is **drafted and escalated to a human — never
+auto-executed**. Returns only within 30 days of delivery.
 
 ## Audit log (Phase 1)
 
@@ -38,7 +44,7 @@ This is the durable, on-disk episodic record.
 - Prompts are stored as a truncated preview + SHA-256 hash, never the
   full text. Card-number-shaped strings are redacted to `[REDACTED]`
   *before* anything is stored — they can't reach any memory layer,
-  including this log.
+  including the backends and this log.
 - Wired through ADK callbacks (`before_agent_callback`,
   `before/after_tool_callback`) plus the tool call sites; with no log
   registered the callbacks are no-ops (zero overhead).
@@ -57,15 +63,50 @@ late-delivery goodwill credit, recall injection into the prompt, PII
 scrubbing in audit previews, and a full multi-session story whose
 16-event audit trail replays in exact order from the JSONL file.
 
+## Durable backends (Phase 2)
+
+`docker-compose.yml` brings up Redis, PostgreSQL + pgvector, and the
+Firestore emulator:
+
+```bash
+docker compose up -d
+```
+
+Then point the agent at them (any subset; unset means in-memory):
+
+```bash
+export SESSION_BACKEND=redis          # 2a: sessions in Redis
+export EPISODIC_BACKEND=pgvector      # 2b: episodes in pgvector
+export SEMANTIC_BACKEND=firestore     # 2c: facts in Firestore
+export FIRESTORE_EMULATOR_HOST=localhost:8080   # the emulator, not cloud
+# export EMBEDDER=gemini              # real Gemini embeddings (needs GOOGLE_API_KEY);
+                                      # default "fake" is deterministic and offline
+```
+
+Real Firestore (later) is a pure connection swap: unset
+`FIRESTORE_EMULATOR_HOST` and provide real credentials — no code
+changes. Same for managed Redis/Postgres: just change the URLs.
+
+Kill/restart drill (the roadmap's acceptance): `docker compose restart
+redis pgvector`, then re-run the integration tests — long-term memory
+must survive, because it lives server-side.
+
 ## Run it
 
 ```bash
-# one-time setup (a venv with google-adk already exists at ../.venv-adk;
-# or make your own)
+# one-time setup
 /home/hatch/workspace/.venv-adk/bin/pip install -r requirements.txt
 
-# full offline test suite -- no API key needed
+# full offline test suite -- no API key, no Docker needed
+# (115 unit tests; 6 integration tests self-skip without backends)
 /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q
+
+# integration tests only (needs: docker compose up -d)
+/home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q -m integration
+
+# eval set against the real backends (needs: docker compose up -d)
+SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore \
+  /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/test_eval.py -q
 
 # offline smoke test of the non-LLM parts
 /home/hatch/workspace/.venv-adk/bin/python demo.py
@@ -94,14 +135,24 @@ support_agent/
   agent.py         LlmAgent, instruction provider, recall + audit callbacks, make_runner()
   audit.py         AuditLog (in-memory + JSONL), PII scrubbing, per-user registry
   tools.py         mock OMS tools + remember_fact/recall_memories (FunctionTools)
-  rules.py         deterministic procedural rules (pure functions)
-  memory_banks.py  EpisodicBank (ADK memory service, PII-scrubbed) + SemanticBank (fact store)
+  rules.py         deterministic procedural rules (pure functions; thresholds from policy.yaml)
+  memory_banks.py  EpisodicBank + SemanticBank (+ shared scrub_event/score_facts helpers)
+  config.py        model name, app name, policy (from rules/policy.yaml), backend env config
+  backends/
+    __init__.py           env-selected factories: make_session_service/_memory_service/_semantic_store/_embedder
+    redis_sessions.py     2a: RedisSessionService (BaseSessionService, sliding TTL, PII-scrubbed)
+    pgvector_memory.py    2b: PgVectorMemoryService + Fake/Gemini embedders + Fake/PgVector stores
+    firestore_semantics.py 2c: FirestoreSemanticBank (SemanticBank-compatible) + FakeFirestore
+    git_rules.py          2d: loads + validates rules/policy.yaml, renders rules/procedural.md
   fixtures.py      mock customers/orders/policies -- all fictional, no real PII
-  config.py        model name, app name, all policy thresholds
-tests/             pytest suite, fully offline (67 tests: unit + 12-scenario eval)
+rules/
+  policy.yaml      procedural policy thresholds (git-versioned source of truth)
+  procedural.md    system-prompt prose (git-versioned; {refund_threshold}/{return_window_days} slots)
+tests/             115 unit tests (offline) + 12-scenario eval + 6 integration tests (marked, self-skip)
 demo.py            offline smoke (default) / live two-session demo (--live); --audit PATH
+docker-compose.yml redis + pgvector + firestore emulator (Phase 2 local infra)
 docs/              target-architecture.svg -- the video's Step-5 diagram, redrawn
 ```
 
 All data is mock and fictional. See [`AGENTS.md`](AGENTS.md) for working
-conventions and [`ROADMAP.md`](ROADMAP.md) for Phases 1–4.
+conventions and [`ROADMAP.md`](ROADMAP.md) for Phases 3–4.

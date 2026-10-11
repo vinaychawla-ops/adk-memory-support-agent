@@ -1,26 +1,74 @@
 # AGENTS.md — agent-memory-support-agent
 
 ## What this repo is
-Phase 0 of ROADMAP.md: the video's e-commerce customer support agent rebuilt
-as a single Google ADK `LlmAgent` on Gemini, with the four memory layers
-(session state, episodic, semantic, procedural) wired through ADK-native
-in-memory services. Mock Order Management System, mock customers, zero
-infrastructure. Runs locally; live turns need `GOOGLE_API_KEY`.
+Phases 0–2 of ROADMAP.md: the video's e-commerce customer support agent
+rebuilt as a single Google ADK `LlmAgent` on Gemini, with the four memory
+layers (session state, episodic, semantic, procedural) wired through
+ADK-native in-memory services by default and durable Docker backends
+(Redis / pgvector / Firestore / git-versioned rules) via env selection.
+Mock Order Management System, mock customers. Runs locally; live turns
+need `GOOGLE_API_KEY`.
 
 ## Build / test commands
 ```bash
 VENV=/home/hatch/workspace/.venv-adk/bin
 $VENV/python -m pytest tests/ -q        # full suite, offline, must be green
+                                       # (integration tests self-skip w/o backends)
+$VENV/python -m pytest tests/ -q -m integration   # needs: docker compose up -d
 $VENV/python demo.py                    # offline smoke of the non-LLM parts
 export GOOGLE_API_KEY=...               # real key, never committed
 $VENV/python demo.py --live             # scripted two-session live demo
 $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
 ```
+Docker backends: `docker compose up -d` (redis :6379, pgvector :5432,
+firestore emulator :8080). Select via env:
+`SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore`
+(+ `FIRESTORE_EMULATOR_HOST=localhost:8080`, `EMBEDDER=fake|gemini`).
 
 ## Conventions
-- `config.py`: ALL policy thresholds live here (`REFUND_APPROVAL_THRESHOLD`,
-  `RETURN_WINDOW_DAYS`, `GOODWILL_CREDIT_MAX`). Never hardcode a threshold
-  in rules, tools, or the instruction -- import it.
+- `config.py`: model name, app name, backend env config. Policy thresholds
+  come from `rules/policy.yaml` (loaded + validated at import via
+  `backends/git_rules.py`) -- never hardcode a threshold in rules.py,
+  tools.py, or the instruction; import it from here.
+- `rules/`: git-versioned procedural memory. `policy.yaml` is the validated
+  source of truth for thresholds (flat `key: value`, stdlib-parsed; bad
+  policy fails fast at startup). `procedural.md` is the system-prompt prose
+  with `{refund_threshold}` / `{return_window_days}` slots, rendered by
+  `git_rules.render_system_prompt()` -- prompt and deterministic rules can
+  never drift apart. Rule changes go through git: the history is the audit
+  trail. Do not add other `{braces}` to the markdown.
+- `backends/`: Phase 2, one module per box. `__init__.py` holds only the
+  env-selected factories (`make_session_service`, `make_memory_service`,
+  `make_semantic_store`, `make_embedder`) with lazy imports -- importing
+  this package must never require redis/psycopg/firestore libs or a key.
+  Agent code never branches on backends; the ADK seams are the interface.
+- `backends/redis_sessions.py`: `RedisSessionService` mirrors
+  InMemorySessionService semantics (state scopes, merge on read, dedupe,
+  list ordering) with JSON sessions under `msa:*` keys and a sliding TTL
+  (`SESSION_TTL_SECONDS`). Events are PII-scrubbed before persistence;
+  the caller's session object is never mutated by the scrub.
+- `backends/pgvector_memory.py`: `PgVectorMemoryService` stores one
+  embedded row per event; `search_memory` orders by cosine distance with
+  a keyword-overlap boost (hybrid). `FakeEmbedder` is deterministic and
+  offline (tests plumbing, not semantic quality); `GeminiEmbedder` reads
+  the key from the env at call time. Blocking psycopg calls run in
+  `asyncio.to_thread`. Keep `EMBEDDING_DIM` stable once the table exists.
+- `backends/firestore_semantics.py`: `FirestoreSemanticBank` implements
+  the `SemanticBank` contract (upsert/supersede/history/search) on one
+  document per user (`semantic_memory/{app}__{user}`) -- no composite
+  indexes needed. `Fact.expires` is an optional ISO date; expired facts
+  stop surfacing, `purge_expired()` drops them (Phase 4 schedules it).
+  The real client honors `FIRESTORE_EMULATOR_HOST`, so emulator vs. cloud
+  is a pure connection swap.
+- Probes must fail fast: backend `ping()`s use short timeouts (the sandbox
+  blackholes ports, so bare connects hang). Integration tests are marked
+  `@pytest.mark.integration` and skip when a backend is unreachable;
+  `tests/conftest.py::_ensure_reachable` lets the whole eval set run
+  against real backends via env vars (or skip cleanly).
+- Recall query: `_recall_before_agent` appends stable domain terms
+  ("customer preferences past orders") ONLY when `EPISODIC_BACKEND=memory`
+  (keyword search needs word overlap). With `pgvector` the raw user text
+  goes to vector search -- the Phase-0 hack is gone there.
 - `rules.py`: pure functions only. No I/O, no network, no LLM. Each returns
   `{"rule", ...}`; malformed input returns `{"rule", "error"}`. This module
   plus the system instruction IS the procedural memory.
@@ -54,17 +102,14 @@ $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
   the semantic write; `EpisodicBank.record_session` logs the episodic write
   (with `pii_redacted` flag). A logging failure must never break the agent
   loop -- keep the helpers total and side-effect-free beyond the log.
-- Recall query: `_recall_before_agent` appends stable domain terms
-  ("customer preferences past orders") to the user's latest message before
-  `ensure_memory_recall`. Phase-0 search is keyword-based, so without this
-  a message like "I want a refund" would never surface the contact
-  preference. Phase 2 replaces this with vector search; until then, extend
-  the domain terms rather than the tool signatures.
 - Eval: `tests/test_eval.py` holds the 12 scripted scenarios -- each reads
   as a customer story and asserts memory behavior (recall / rule fired /
   fact superseded). Extend it when adding a layer or a rule; the
   `test_eval_audit_replays_full_multisession_story` test pins the exact
   16-event audit sequence, so update it deliberately when the wiring changes.
+  The whole eval set also runs against real backends via env vars
+  (`SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore`),
+  skipping cleanly when they are not running.
 - Session state discipline: tools write STRUCTURED state only
   (`active_order_id`, `return_in_progress`, `memory_context`,
   `memory_recall_done`). History comes from session events, not state.
@@ -90,9 +135,13 @@ $VENV/python -m py_compile $(find support_agent tests demo.py -name '*.py')
   set (`tests/test_eval.py`), conflict handling verified (upsert->supersede
   ->history; newer preference wins), PII guardrail extended to episodes
   (scrubbed on write) and audit previews.
-- Phase 2 swaps each in-memory service for the video's store behind the
-  same ADK seams; agent code must not change to accommodate a backend.
-  The audit callbacks resolve logs from the session, so they survive the
-  swap untouched.
+- Phase 2 (done 2026-10-11): all four boxes behind the ADK seams --
+  `backends/redis_sessions.py` (2a), `backends/pgvector_memory.py` (2b,
+  Fake/Gemini embedders, hybrid vector+keyword search),
+  `backends/firestore_semantics.py` (2c, one doc per user, emulator-ready),
+  `rules/policy.yaml` + `rules/procedural.md` (2d, git-versioned). Agent
+  code has no backend branches; selection is env-driven with in-memory
+  defaults. The Phase-0 keyword-search hack in the recall query now only
+  applies when `EPISODIC_BACKEND=memory`.
 - When adding a layer, extend the recall block and the eval scenarios,
   not the tool signatures.

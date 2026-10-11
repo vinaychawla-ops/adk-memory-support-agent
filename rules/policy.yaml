@@ -1,0 +1,26 @@
+# Procedural policy — the source of truth for the deterministic rules layer.
+#
+# These values are loaded at startup by support_agent/backends/git_rules.py
+# and validated (see load_policy). Every consumer — rules.py, tools.py, the
+# agent instruction — reads them from support_agent.config, so a policy
+# change is a one-line diff HERE, committed to git. The commit history is
+# the audit trail for procedural memory: who changed what, when, and why.
+#
+# Format: flat `key: value` lines only (parsed without external deps).
+# Numbers may be int or float where noted.
+
+# Refunds / goodwill credits at or below this amount (USD) may be issued by
+# the mock OMS directly. Anything above is drafted and routed to a human —
+# the agent never auto-executes it.
+refund_approval_threshold: 50.0
+
+# Returns are accepted within this many days of delivery.
+return_window_days: 30
+
+# Goodwill credits at or below this amount (USD) may be issued directly for
+# service failures (e.g. late delivery). Sits under refund_approval_threshold.
+goodwill_credit_max: 25.0
+
+# Recall budget: how many past episodes / facts the recall block carries.
+max_episodic_hits: 5
+max_semantic_facts: 10

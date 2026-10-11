@@ -65,20 +65,43 @@ suite green without a key.
 
 ## Phase 2 — Durable memory backends (the Memory Handling panel, box by box)
 
-**What changes:** each ADK-native service is swapped for the video's store. The agent code
+**Status: done 2026-10-11** — all four boxes implemented behind the ADK
+seams, running in local Docker per the user's decision (real cloud is a
+later connection swap). Agent code has no backend branches.
+
+**What changed:** each ADK-native service is swapped for the video's store. The agent code
 doesn't change — ADK's service interfaces are the seam.
 
-- **2a — Redis:** custom `SessionService` on Redis. Conversation history + session state,
-  with TTL per session. Any replica can serve any session (this unblocks Phase 3).
-- **2b — PostgreSQL + pgvector:** custom `MemoryService` episodic store. Past interactions
-  embedded (Gemini embeddings) and retrieved by hybrid search.
-- **2c — Firestore:** semantic facts as documents `{fact, confidence, supersedes, expires}`.
-  Upsert + staleness logic lives here.
-- **2d — Git repo:** procedural rules as versioned YAML/Markdown, loaded at startup.
-  Rule changes go through PRs — the changelog *is* the audit trail.
+- **2a — Redis:** `backends/redis_sessions.py` (`RedisSessionService`).
+  Sessions as JSON under `msa:*` keys with a sliding 30-day TTL; app/user
+  state in shared hashes, merged on read exactly like the in-memory
+  service. Any replica serves any session (unblocks Phase 3). Events are
+  PII-scrubbed before persistence.
+- **2b — PostgreSQL + pgvector:** `backends/pgvector_memory.py`
+  (`PgVectorMemoryService`). One embedded row per event; `search_memory`
+  orders by cosine distance with a keyword-overlap boost (hybrid). This
+  **replaces the Phase-0 keyword-search hack** — with
+  `EPISODIC_BACKEND=pgvector` the recall query is the raw user text, no
+  appended domain terms. Embeddings via `EMBEDDER=fake` (deterministic,
+  offline) or `gemini` (key from env at call time).
+- **2c — Firestore:** `backends/firestore_semantics.py`
+  (`FirestoreSemanticBank`, same contract as `SemanticBank`). One document
+  per user (`semantic_memory/{app}__{user}`), facts as
+  `{slot, text, confidence, superseded_by, expires}`. Local = Firestore
+  emulator in Docker; the client honors `FIRESTORE_EMULATOR_HOST`, so
+  real Firestore is a pure connection swap.
+- **2d — Git repo:** `rules/policy.yaml` (validated thresholds — the
+  source of truth `config.py` loads at import) + `rules/procedural.md`
+  (system-prompt prose with `{refund_threshold}`/`{return_window_days}`
+  slots). Rule changes go through git — the changelog *is* the audit trail.
 
-**Acceptance per sub-phase:** Phase-0 eval set still green with the new backend; a backend
-can be killed and restarted without losing long-term memory.
+**Acceptance per sub-phase:** the Phase-1 eval set passes with the new
+backends (`SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector
+SEMANTIC_BACKEND=firestore pytest tests/test_eval.py`); the kill/restart
+drill (`docker compose restart redis pgvector`) loses no long-term
+memory — data lives server-side. 6 integration tests
+(`tests/test_backends_integration.py`, marked, self-skipping) pin this;
+115 unit tests stay green offline with fakes.
 
 ## Phase 3 — Serve and scale (the left half of the diagram)
 
@@ -113,14 +136,14 @@ the eval set still passes.
 
 ## Appendix A — ADK seams (what to subclass, and when)
 
-| Diagram box | Phase 0 (now) | Target | ADK seam | Phase |
-|---|---|---|---|---|
-| Conversation history & session state | `InMemorySessionService` | Redis | `BaseSessionService` | 2a |
-| Episodic, long term | `InMemoryMemoryService` | pgvector | `BaseMemoryService` | 2b |
-| Semantic, long term | `InMemoryMemoryService` | Firestore | `BaseMemoryService` (second bank) or doc store | 2c |
-| Procedural, long term | system instruction + rules module | Git-versioned rules | loaded config, no subclass needed | 2d |
-| API | `demo.py` CLI | FastAPI + Runner | `Runner` | 3 |
-| Load balancer / replicas | single process | LB → N replicas | infra, not ADK | 3 |
+| Diagram box | Phase 0–1 (in-memory) | Phase 2 (done 2026-10-11) | ADK seam |
+|---|---|---|---|
+| Conversation history & session state | `InMemorySessionService` | `RedisSessionService` (JSON, sliding TTL) | `BaseSessionService` |
+| Episodic, long term | `InMemoryMemoryService` | `PgVectorMemoryService` (embedded rows, hybrid search) | `BaseMemoryService` |
+| Semantic, long term | `SemanticBank` (in-memory) | `FirestoreSemanticBank` (one doc/user, emulator-ready) | `SemanticBank`-compatible store |
+| Procedural, long term | system instruction + rules module | `rules/policy.yaml` + `rules/procedural.md`, git-versioned | loaded config, no subclass needed |
+| API | `demo.py` CLI | FastAPI + Runner | `Runner` | Phase 3 |
+| Load balancer / replicas | single process | LB → N replicas | infra, not ADK | Phase 3 |
 
 ## Appendix B — Out of scope
 
