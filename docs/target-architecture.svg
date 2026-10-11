@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600" font-family="system-ui, -apple-system, sans-serif">
+  <rect width="900" height="600" fill="#ffffff"/>
+  <text x="24" y="34" font-size="17" font-weight="700" fill="#1a1a1a">Target architecture — Step 5 (video diagram, ADK port)</text>
+  <text x="24" y="56" font-size="12" fill="#666">Phase 0 builds all four memory layers on ADK-native services · Phases 2–3 swap in the boxes below without changing agent code</text>
+
+  <!-- Left flow: UI -> API -> LB -> agents -->
+  <rect x="24" y="200" width="120" height="56" rx="6" fill="#fff" stroke="#3b82f6" stroke-width="2"/>
+  <text x="84" y="224" font-size="12" text-anchor="middle" fill="#1a1a1a">User Interface</text>
+  <text x="84" y="241" font-size="12" text-anchor="middle" fill="#1a1a1a">(chat)</text>
+
+  <line x1="144" y1="228" x2="172" y2="228" stroke="#3b82f6" stroke-width="2" marker-end="url(#arr)"/>
+
+  <rect x="172" y="200" width="76" height="56" rx="6" fill="#d9f2e3" stroke="#2f9e5f" stroke-width="2"/>
+  <text x="210" y="232" font-size="13" text-anchor="middle" fill="#1a1a1a">API</text>
+  <text x="210" y="270" font-size="10" text-anchor="middle" fill="#666">Phase 3</text>
+
+  <line x1="248" y1="228" x2="282" y2="228" stroke="#555" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Load balancer -->
+  <circle cx="306" cy="228" r="20" fill="#fff" stroke="#555" stroke-width="2"/>
+  <line x1="306" y1="228" x2="336" y2="196" stroke="#555" stroke-width="1.6"/>
+  <line x1="306" y1="228" x2="336" y2="228" stroke="#555" stroke-width="1.6"/>
+  <line x1="306" y1="228" x2="336" y2="260" stroke="#555" stroke-width="1.6"/>
+  <text x="306" y="272" font-size="10" text-anchor="middle" fill="#555">Load Balancer</text>
+
+  <!-- Agents box -->
+  <rect x="344" y="120" width="170" height="216" rx="8" fill="#fff" stroke="#333" stroke-width="1.6"/>
+  <text x="429" y="112" font-size="11" text-anchor="middle" fill="#555">replicas · Phase 3</text>
+  <rect x="364" y="140" width="130" height="44" rx="6" fill="#d9f2e3" stroke="#2f9e5f" stroke-width="1.6"/>
+  <text x="429" y="167" font-size="13" text-anchor="middle" fill="#1a1a1a">Agent 1-a</text>
+  <rect x="364" y="196" width="130" height="44" rx="6" fill="#d9f2e3" stroke="#2f9e5f" stroke-width="1.6"/>
+  <text x="429" y="223" font-size="13" text-anchor="middle" fill="#1a1a1a">Agent 1-b</text>
+  <rect x="364" y="252" width="130" height="44" rx="6" fill="#d9f2e3" stroke="#2f9e5f" stroke-width="1.6"/>
+  <text x="429" y="279" font-size="13" text-anchor="middle" fill="#1a1a1a">Agent 1-c</text>
+
+  <!-- LLM on top -->
+  <rect x="379" y="24" width="100" height="48" rx="6" fill="#fef3c7" stroke="#d97706" stroke-width="1.6"/>
+  <text x="429" y="53" font-size="13" text-anchor="middle" fill="#1a1a1a">LLM</text>
+  <line x1="429" y1="72" x2="429" y2="112" stroke="#d97706" stroke-width="1.6" stroke-dasharray="5,4" marker-end="url(#arr)"/>
+  <text x="545" y="86" font-size="11" fill="#666">User prompt</text>
+  <text x="545" y="101" font-size="11" fill="#666">+ previous conversations</text>
+
+  <!-- Tools below agents -->
+  <line x1="429" y1="336" x2="429" y2="368" stroke="#555" stroke-width="1.6" marker-end="url(#arr)"/>
+  <rect x="344" y="368" width="170" height="46" rx="6" fill="#f3f4f6" stroke="#888" stroke-width="1.4"/>
+  <text x="429" y="388" font-size="11" text-anchor="middle" fill="#333">Org's Internal APIs as Tools</text>
+  <text x="429" y="404" font-size="10" text-anchor="middle" fill="#777">Phase 0: mock · later: real</text>
+  <rect x="364" y="424" width="130" height="44" rx="6" fill="#f3f4f6" stroke="#888" stroke-width="1.4"/>
+  <text x="429" y="444" font-size="11" text-anchor="middle" fill="#333">Order Management</text>
+  <text x="429" y="459" font-size="11" text-anchor="middle" fill="#333">System</text>
+
+  <!-- Memory Handling panel -->
+  <rect x="570" y="90" width="306" height="440" rx="10" fill="#eef1f5" stroke="#c3c9d4" stroke-width="1.4"/>
+  <text x="723" y="114" font-size="13" font-weight="600" text-anchor="middle" fill="#333">Memory Handling</text>
+
+  <rect x="590" y="128" width="266" height="86" rx="6" fill="#bfe8e0" stroke="#2a9d8f" stroke-width="1.4"/>
+  <text x="723" y="152" font-size="13" font-weight="600" text-anchor="middle" fill="#1a1a1a">PostgreSQL + pgvector</text>
+  <text x="723" y="172" font-size="11" text-anchor="middle" fill="#333">Episodic memory · long term</text>
+  <text x="723" y="190" font-size="11" text-anchor="middle" fill="#0f766e">Phase 2b — Phase 0: ADK in-memory</text>
+
+  <rect x="590" y="226" width="266" height="86" rx="6" fill="#bfe8e0" stroke="#2a9d8f" stroke-width="1.4"/>
+  <text x="723" y="250" font-size="13" font-weight="600" text-anchor="middle" fill="#1a1a1a">Redis (distributed cache)</text>
+  <text x="723" y="270" font-size="11" text-anchor="middle" fill="#333">Conversation history &amp; session state</text>
+  <text x="723" y="288" font-size="11" text-anchor="middle" fill="#0f766e">Phase 2a — Phase 0: ADK in-memory</text>
+
+  <rect x="590" y="324" width="266" height="86" rx="6" fill="#bfe8e0" stroke="#2a9d8f" stroke-width="1.4"/>
+  <text x="723" y="348" font-size="13" font-weight="600" text-anchor="middle" fill="#1a1a1a">Firestore</text>
+  <text x="723" y="368" font-size="11" text-anchor="middle" fill="#333">Semantic memory · long term</text>
+  <text x="723" y="386" font-size="11" text-anchor="middle" fill="#0f766e">Phase 2c — Phase 0: ADK in-memory</text>
+
+  <rect x="590" y="422" width="266" height="86" rx="6" fill="#bfe8e0" stroke="#2a9d8f" stroke-width="1.4"/>
+  <text x="723" y="446" font-size="13" font-weight="600" text-anchor="middle" fill="#1a1a1a">Git repo</text>
+  <text x="723" y="466" font-size="11" text-anchor="middle" fill="#333">Procedural memory · long term</text>
+  <text x="723" y="484" font-size="11" text-anchor="middle" fill="#0f766e">Phase 2d — Phase 0: rules module</text>
+
+  <!-- agents -> memory arrow -->
+  <line x1="514" y1="228" x2="566" y2="228" stroke="#555" stroke-width="1.6" marker-end="url(#arr)"/>
+  <text x="540" y="218" font-size="10" text-anchor="middle" fill="#555">read/write</text>
+
+  <text x="24" y="580" font-size="11" fill="#777">Phase 4 (forgetting) cuts across every box: TTLs, episodic summarization, semantic staleness review, procedural deprecation.</text>
+
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 z" fill="#555"/>
+    </marker>
+  </defs>
+</svg>
