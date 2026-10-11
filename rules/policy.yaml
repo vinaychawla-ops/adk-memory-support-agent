@@ -24,3 +24,37 @@ goodwill_credit_max: 25.0
 # Recall budget: how many past episodes / facts the recall block carries.
 max_episodic_hits: 5
 max_semantic_facts: 10
+
+# --- Phase 4: the forgetting layer ---------------------------------------
+# Sessions idle longer than this (days) are compacted. Their episodic
+# record was already captured per-turn, so nothing is truly lost.
+session_abandon_days: 14
+
+# Episodes older than this (days) are summarized into one rolling semantic
+# fact ("3 late deliveries in Q4"), then the raw episodes are dropped.
+episodic_summary_days: 90
+
+# Facts below this confidence are flagged for human re-confirmation
+# (drafted as a review list -- never auto-purged).
+fact_min_confidence: 0.4
+
+# Facts not confirmed within this many days are flagged as stale.
+fact_reconfirm_days: 180
+
+# Superseded facts older than this (days) are purged. The audit JSONL
+# keeps the full trail, so the history is not lost.
+superseded_retention_days: 180
+
+# Procedural rule deprecation: a deprecated rule stays readable in git
+# history but stops firing, and its prose is dropped from the rendered
+# system prompt. One flag per rule (must name a known rule).
+deprecated_refund_approval: false
+deprecated_return_eligibility: false
+deprecated_escalation: false
+deprecated_late_delivery_credit: false
+
+# Cost model, USD per million tokens. PLACEHOLDERS -- replace with your
+# model's actual prices. Used only for the maintenance report's
+# estimated-cost figures, which are always labeled as estimates.
+llm_cost_per_mtok_input_usd: 0.30
+llm_cost_per_mtok_output_usd: 1.20

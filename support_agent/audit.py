@@ -187,6 +187,9 @@ def log_turn(app_name: str, user_id: str, session_id: str | None, prompt: str) -
             "session_id": session_id,
             "prompt_preview": prompt_preview(prompt),
             "prompt_hash": prompt_hash(prompt),
+            # Length only (no content): feeds the Phase-4 maintenance
+            # report's token/cost estimates without storing more text.
+            "prompt_chars": len(prompt or ""),
         },
     )
 
@@ -214,6 +217,10 @@ def log_tool_result(
     result: dict,
 ) -> None:
     status = "error" if isinstance(result, dict) and "error" in result else "ok"
+    try:
+        result_chars = len(json.dumps(result, default=str))
+    except Exception:
+        result_chars = 0
     _emit(
         app_name,
         user_id,
@@ -223,6 +230,8 @@ def log_tool_result(
             "tool": tool_name,
             "status": status,
             "result_preview": _scrub_value(result),
+            # Length only: tool outputs also consume model input tokens.
+            "result_chars": result_chars,
         },
     )
 
@@ -264,7 +273,14 @@ def log_memory_recall(
     session_id: str | None,
     injected: bool,
     block_chars: int,
+    *,
+    episodic_chars: int = 0,
+    semantic_chars: int = 0,
+    episodic_hits: int = 0,
+    semantic_hits: int = 0,
 ) -> None:
+    """Log a recall injection. Per-layer char/hit counts (Phase 4) feed the
+    maintenance report's hit-rate and token estimates."""
     _emit(
         app_name,
         user_id,
@@ -273,5 +289,9 @@ def log_memory_recall(
             "session_id": session_id,
             "injected": injected,
             "block_chars": block_chars,
+            "episodic_chars": episodic_chars,
+            "semantic_chars": semantic_chars,
+            "episodic_hits": episodic_hits,
+            "semantic_hits": semantic_hits,
         },
     )

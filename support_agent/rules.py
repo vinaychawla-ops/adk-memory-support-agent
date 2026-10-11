@@ -16,6 +16,25 @@ from support_agent import config
 from support_agent import fixtures
 
 
+def _deprecated(rule_name: str) -> dict | None:
+    """Return a deprecated verdict if the rule is flagged in policy.yaml.
+
+    Deprecated rules stay readable in git history but stop firing --
+    callers get an explicit "not fired" verdict instead of a decision.
+    """
+    if rule_name in config.DEPRECATED_RULES:
+        return {
+            "rule": rule_name,
+            "deprecated": True,
+            "decision": "not_fired",
+            "reason": (
+                f"Rule {rule_name!r} is deprecated in rules/policy.yaml; "
+                "it no longer fires."
+            ),
+        }
+    return None
+
+
 def evaluate_refund_request(amount: float, order: dict | None = None) -> dict:
     """Decide whether a refund/credit may be issued directly or needs a human.
 
@@ -23,6 +42,9 @@ def evaluate_refund_request(amount: float, order: dict | None = None) -> dict:
     - amount >  REFUND_APPROVAL_THRESHOLD: draft the request and escalate;
       the agent must never execute it itself.
     """
+    deprecated = _deprecated("refund_approval")
+    if deprecated is not None:
+        return deprecated
     if not isinstance(amount, (int, float)) or amount <= 0:
         return {"rule": "refund_approval", "error": "amount must be a positive number"}
     if order is not None and not isinstance(order, dict):
@@ -50,6 +72,9 @@ def evaluate_refund_request(amount: float, order: dict | None = None) -> dict:
 
 def check_return_eligibility(order: dict, today: date | None = None) -> dict:
     """A return is eligible only if delivered and within the return window."""
+    deprecated = _deprecated("return_eligibility")
+    if deprecated is not None:
+        return deprecated
     if not isinstance(order, dict) or "order_id" not in order:
         return {"rule": "return_eligibility", "error": "order must be an order dict"}
     today = today or fixtures.TODAY
@@ -92,6 +117,9 @@ def should_escalate(signals: dict) -> dict:
     - vip_high_value: VIP customer AND amount above the refund threshold
     - agent_unsure: the agent cannot resolve with available tools
     """
+    deprecated = _deprecated("escalation")
+    if deprecated is not None:
+        return deprecated
     if not isinstance(signals, dict):
         return {"rule": "escalation", "error": "signals must be a dict"}
 
@@ -116,6 +144,9 @@ def should_escalate(signals: dict) -> dict:
 
 def late_delivery_credit(order: dict) -> dict:
     """Goodwill credit for a late delivery, capped by policy."""
+    deprecated = _deprecated("late_delivery_credit")
+    if deprecated is not None:
+        return deprecated
     if not isinstance(order, dict) or "order_id" not in order:
         return {"rule": "late_delivery_credit", "error": "order must be an order dict"}
     late = fixtures.days_late(order)

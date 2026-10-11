@@ -21,7 +21,7 @@ import dataclasses
 
 from support_agent import config
 from support_agent.audit import CARD_RE
-from support_agent.memory_banks import Fact, _utcnow, score_facts
+from support_agent.memory_banks import Fact, _days_between, _today_iso, _utcnow, score_facts
 
 
 class FirestoreSemanticBank:
@@ -89,6 +89,7 @@ class FirestoreSemanticBank:
                 "updated_at": now,
                 "superseded_by": None,
                 "expires": None,
+                "last_confirmed": now,
             }
         )
         self._write(facts)
@@ -128,6 +129,50 @@ class FirestoreSemanticBank:
         if removed:
             self._write(kept)
         return removed
+
+    def purge_superseded_older_than(self, days: int) -> int:
+        """Drop superseded facts whose supersession is older than `days`.
+
+        Returns the number removed. Same contract as
+        SemanticBank.purge_superseded_older_than.
+        """
+        facts = self._read()
+        today = _today_iso()
+        kept = []
+        removed = 0
+        for raw in facts:
+            if raw.get("superseded_by") is not None:
+                age = _days_between((raw.get("updated_at") or "")[:10], today)
+                if age is not None and age > days:
+                    removed += 1
+                    continue
+            kept.append(raw)
+        if removed:
+            self._write(kept)
+        return removed
+
+    def reconfirm(self, slot: str) -> dict:
+        """Mark the active fact(s) in `slot` as confirmed now.
+
+        The human-review path for the staleness review. Same contract as
+        SemanticBank.reconfirm.
+        """
+        slot = (slot or "").strip()
+        facts = self._read()
+        now = _utcnow()
+        touched = 0
+        for raw in facts:
+            if raw.get("slot") == slot and raw.get("superseded_by") is None:
+                fact = self._to_fact(raw)
+                if not fact.active:
+                    continue
+                raw["last_confirmed"] = now
+                raw["updated_at"] = now
+                touched += 1
+        if not touched:
+            return {"error": f"no active fact in slot {slot!r}"}
+        self._write(facts)
+        return {"reconfirmed": True, "slot": slot, "facts": touched}
 
     def ping(self) -> None:
         """Raise if Firestore is unreachable (used by test skips).

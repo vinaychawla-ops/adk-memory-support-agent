@@ -130,6 +130,22 @@ class EpisodeStore(abc.ABC):
         limit: int,
     ) -> list[dict]: ...
 
+    @abc.abstractmethod
+    def list_episodes_older_than(
+        self, *, app_name: str, user_id: str, cutoff_iso: str
+    ) -> list[dict]:
+        """Episodes with a timestamp older than cutoff_iso (Phase 4).
+
+        Returns dicts with id/session_id/author/timestamp/text. Rows with
+        no timestamp are excluded (their age is unknown).
+        """
+        ...
+
+    @abc.abstractmethod
+    def delete_episode(self, *, episode_id) -> None:
+        """Drop one episode row by id (Phase 4 summarization)."""
+        ...
+
     def ping(self) -> None:
         """Raise if the store is unreachable (used by test skips)."""
 
@@ -243,6 +259,41 @@ class PgVectorEpisodeStore(EpisodeStore):
             )
         return out
 
+    def list_episodes_older_than(
+        self, *, app_name: str, user_id: str, cutoff_iso: str
+    ) -> list[dict]:
+        """Episodes with ts older than cutoff_iso (Phase 4 summarization).
+
+        Rows with NULL ts are excluded -- their age is unknown.
+        """
+        sql = (
+            "SELECT e.id, e.session_id, e.author, e.ts, e.text "
+            "FROM episodes e "
+            "WHERE e.app_name=%s AND e.user_id=%s "
+            "AND e.ts IS NOT NULL AND e.ts < %s::timestamptz "
+            "ORDER BY e.ts"
+        )
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (app_name, user_id, cutoff_iso))
+                rows = cur.fetchall()
+        return [
+            {
+                "id": rid,
+                "session_id": sid,
+                "author": author,
+                "timestamp": ts.isoformat() if ts else None,
+                "text": text,
+            }
+            for rid, sid, author, ts, text in rows
+        ]
+
+    def delete_episode(self, *, episode_id) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM episodes WHERE id=%s", (episode_id,))
+            conn.commit()
+
     def ping(self) -> None:
         with self._connect() as conn:
             with conn.cursor() as cur:
@@ -294,6 +345,32 @@ class FakeEpisodeStore(EpisodeStore):
             for _, r in scored[:limit]
         ]
 
+    def list_episodes_older_than(
+        self, *, app_name: str, user_id: str, cutoff_iso: str
+    ) -> list[dict]:
+        """Episodes with ts older than cutoff_iso (Phase 4, offline)."""
+        out = []
+        for row in self._rows:
+            if row["app_name"] != app_name or row["user_id"] != user_id:
+                continue
+            ts = row.get("ts")
+            if not ts or ts >= cutoff_iso:
+                continue
+            out.append(
+                {
+                    "id": row["id"],
+                    "session_id": row.get("session_id"),
+                    "author": row.get("author"),
+                    "timestamp": ts,
+                    "text": row["text"],
+                }
+            )
+        out.sort(key=lambda r: r["timestamp"] or "")
+        return out
+
+    def delete_episode(self, *, episode_id) -> None:
+        self._rows = [r for r in self._rows if r["id"] != episode_id]
+
 
 # --- The ADK memory service -------------------------------------------------
 
@@ -323,6 +400,11 @@ class PgVectorMemoryService(BaseMemoryService):
         self._store = store
         self._embedder = embedder
         self._ensured = False
+
+    @property
+    def episode_store(self) -> EpisodeStore:
+        """The underlying store (Phase 4 maintenance needs list/delete)."""
+        return self._store
 
     async def _ensure(self) -> None:
         if not self._ensured:

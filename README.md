@@ -126,6 +126,51 @@ p95 turn-latency budget: documented as an acceptance criterion in
 ROADMAP.md, but not measurable here — it needs the live model and real
 load, so it stays a manual check on your machine.
 
+## The forgetting layer (Phase 4)
+
+Memory gets a lifecycle, all driven by `rules/policy.yaml` (tunable,
+git-versioned):
+
+| Layer | Policy | What happens |
+|---|---|---|
+| Sessions | `session_abandon_days: 14` | idle sessions compacted (their episodic record was already captured per-turn) |
+| Episodic | `episodic_summary_days: 90` | old episodes summarized into one rolling `episodic_summary` fact, raw rows dropped |
+| Semantic | `fact_min_confidence: 0.4`, `fact_reconfirm_days: 180`, `superseded_retention_days: 180` | expired + long-dead superseded facts purged; low-confidence / stale / conflicted facts flagged for human review (drafts, never auto-purged) |
+| Procedural | `deprecated_<rule>: true` | deprecated rules stop firing and drop out of the prompt; they stay readable in git history |
+
+Episodic summarization needs the LLM: `SUMMARIZER=gemini` uses your
+`GOOGLE_API_KEY` at call time; the default `fake` summarizer is
+deterministic and offline. Episodes are PII-scrubbed before the
+summarizer sees them, and the summary is refused if it still matches a
+card pattern.
+
+```bash
+# metrics from an audit trail (+ offline retrieval-precision probes)
+/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance report \
+  --audit /tmp/audit.jsonl --precision
+
+# maintenance pass -- dry-run by default, --execute to perform
+/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance run --user maya
+/home/hatch/workspace/.venv-adk/bin/python -m support_agent.maintenance run --user maya --execute
+```
+
+The `report` shows recall hit rate per layer, average memory-context
+tokens per turn per layer, estimated input cost per turn/ticket (rates
+are placeholders in policy.yaml — replace with your model's actual
+prices), and retrieval precision@5 on scripted probes.
+
+The forgetting drill is the acceptance test
+(`tests/test_maintenance.py`): aged-out data is seeded into every
+store, maintenance runs, the data is provably gone, and the eval set
+still passes. Against real backends:
+
+```bash
+docker compose up -d --build
+SESSION_BACKEND=redis EPISODIC_BACKEND=pgvector SEMANTIC_BACKEND=firestore \
+  FIRESTORE_EMULATOR_HOST=localhost:8080 \
+  /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/test_maintenance.py -q -m integration
+```
+
 ## Run it
 
 ```bash
@@ -133,7 +178,7 @@ load, so it stays a manual check on your machine.
 /home/hatch/workspace/.venv-adk/bin/pip install -r requirements.txt
 
 # full offline test suite -- no API key, no Docker needed
-# (125 unit tests; 8 integration tests self-skip without the compose stack)
+# (147 unit tests; 9 integration tests self-skip without the compose stack)
 /home/hatch/workspace/.venv-adk/bin/python -m pytest tests/ -q
 
 # integration tests only (needs: docker compose up -d --build)
@@ -174,6 +219,8 @@ support_agent/
   memory_banks.py  EpisodicBank + SemanticBank (+ shared scrub_event/score_facts helpers)
   config.py        model name, app name, policy (from rules/policy.yaml), backend env config
   api.py           Phase 3: FastAPI app -- POST /chat + GET /health over the ADK Runner
+  maintenance.py   Phase 4: the forgetting layer -- per-layer lifecycle, metrics, CLI
+                     (report | run [--execute]); support_agent.maintenance
   backends/
     __init__.py           env-selected factories: make_session_service/_memory_service/_semantic_store/_embedder
     redis_sessions.py     2a: RedisSessionService (BaseSessionService, sliding TTL, PII-scrubbed)
@@ -182,9 +229,10 @@ support_agent/
     git_rules.py          2d: loads + validates rules/policy.yaml, renders rules/procedural.md
   fixtures.py      mock customers/orders/policies -- all fictional, no real PII
 rules/
-  policy.yaml      procedural policy thresholds (git-versioned source of truth)
-  procedural.md    system-prompt prose (git-versioned; {refund_threshold}/{return_window_days} slots)
-tests/             125 unit tests (offline) + 12-scenario eval + 8 integration tests (marked, self-skip)
+  policy.yaml      procedural policy thresholds + Phase 4 lifecycle policy (git-versioned source of truth)
+  procedural.md    system-prompt prose (git-versioned; {refund_threshold}/{return_window_days} slots;
+                     per-rule <!-- rule:name --> blocks so deprecated rules drop out)
+tests/             147 unit tests (offline) + 12-scenario eval + forgetting drill + 9 integration tests (marked, self-skip)
 demo.py            offline smoke (default) / live two-session demo (--live); --audit PATH
 docker-compose.yml Phase 2 backends + Phase 3 replicas (agent-1a/b/c) + nginx LB (:8000)
 Dockerfile         agent replica image (uvicorn support_agent.api:app on :8000)

@@ -42,6 +42,35 @@ GOODWILL_CREDIT_MAX = float(POLICY["goodwill_credit_max"])
 MAX_EPISODIC_HITS = int(POLICY["max_episodic_hits"])
 MAX_SEMANTIC_FACTS = int(POLICY["max_semantic_facts"])
 
+# --- Phase 4: the forgetting layer (all from rules/policy.yaml) ----------------
+# Sessions idle longer than this (days) are compacted by maintenance.
+SESSION_ABANDON_DAYS = int(POLICY["session_abandon_days"])
+
+# Episodes older than this (days) are summarized into one rolling semantic
+# fact, then the raw episodes are dropped.
+EPISODIC_SUMMARY_DAYS = int(POLICY["episodic_summary_days"])
+
+# Facts below this confidence are flagged for human re-confirmation
+# (drafted, never auto-purged).
+FACT_MIN_CONFIDENCE = float(POLICY["fact_min_confidence"])
+
+# Facts not confirmed within this many days are flagged as stale.
+FACT_RECONFIRM_DAYS = int(POLICY["fact_reconfirm_days"])
+
+# Superseded facts older than this (days) are purged (audit JSONL keeps
+# the full trail).
+SUPERSEDED_RETENTION_DAYS = int(POLICY["superseded_retention_days"])
+
+# Procedural rules flagged `deprecated_<name>: true` stop firing (they stay
+# readable in git history; their prose is dropped from the prompt).
+DEPRECATED_RULES = git_rules.deprecated_rules(POLICY)
+
+# Cost model, USD per million tokens. PLACEHOLDERS -- replace with your
+# model's actual prices; the maintenance report always labels cost figures
+# as estimates.
+LLM_COST_PER_MTOK_INPUT_USD = float(POLICY["llm_cost_per_mtok_input_usd"])
+LLM_COST_PER_MTOK_OUTPUT_USD = float(POLICY["llm_cost_per_mtok_output_usd"])
+
 # --- Durable backends (Phase 2) ------------------------------------------------
 SESSION_BACKEND = os.environ.get("SESSION_BACKEND", "memory")
 EPISODIC_BACKEND = os.environ.get("EPISODIC_BACKEND", "memory")

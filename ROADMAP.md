@@ -146,20 +146,58 @@ model and real load.
 
 ## Phase 4 — Operate: the forgetting layer
 
-**What changes:** memory gets a lifecycle. This is the part the video names and almost no
+**Status: done 2026-10-11** — the roadmap is complete. Every memory layer
+has a lifecycle, all driven by `rules/policy.yaml` (tunable, git-versioned);
+`support_agent/maintenance.py` holds the logic plus the CLI
+(`python -m support_agent.maintenance report --audit PATH [--precision]`
+and `run --user USER [--layer all|session|episodic|semantic|procedural]
+[--execute]`; dry-run is the default, `--user` is required).
+
+**What changed:** memory gets a lifecycle. This is the part the video names and almost no
 tutorial implements.
 
-- **Session state:** Redis TTL expiry; abandoned carts/sessions compacted, not kept forever.
-- **Episodic:** old episodes summarized into semantic facts ("customer had 3 late deliveries
-  in Q4" replaces three full transcripts), then the raw episodes drop.
-- **Semantic:** staleness review — facts carry `expires` / `last_confirmed`; low-confidence
-  or contradicted facts are re-confirmed or purged.
-- **Procedural:** rules versioned in git; deprecated rules stay readable but stop firing.
-- **Metrics:** memory hit rate per layer, retrieval precision on the eval set, context tokens
-  consumed per turn per layer, cost per resolved ticket.
+- **Session state:** `compact_sessions` deletes sessions idle longer than
+  `session_abandon_days` (14d default). The episodic record was already
+  captured per-turn, so nothing is truly lost. (The 30-day sliding Redis
+  TTL still stands as the backstop.)
+- **Episodic:** `summarize_episodes` rolls episodes older than
+  `episodic_summary_days` (90d) into one rolling `episodic_summary`
+  semantic fact ("N past interactions. Recurring topics: ..."), then
+  drops the raw rows. `FakeSummarizer` is deterministic/offline;
+  `GeminiSummarizer` (`SUMMARIZER=gemini`) reads the key from the env at
+  call time. Episodes are PII-scrubbed before the summarizer, and the
+  summary is refused on a card-pattern match. Needs
+  `EpisodeStore.list_episodes_older_than`/`delete_episode` (implemented
+  on both pgvector stores); the in-memory backend reports "unsupported"
+  instead of failing.
+- **Semantic:** `review_semantic` classifies every fact -- expired and
+  long-dead superseded facts are purged (`purge_expired`,
+  `purge_superseded_older_than`, now on both semantic stores);
+  low-confidence / stale (unconfirmed past `fact_reconfirm_days`) /
+  conflicted (slot with >1 active fact) facts are *flagged* as drafts for
+  human review, never auto-purged. `Fact.last_confirmed` added (falls back
+  to `created_at`); `reconfirm(slot)` is the human-review path on both
+  stores.
+- **Procedural:** `deprecated_<rule>: true` flags in policy.yaml (validated
+  against `git_rules.KNOWN_RULES`). A deprecated rule returns an explicit
+  not-fired verdict from rules.py and its `<!-- rule:name -->` prose block
+  is dropped from the rendered prompt -- readable in git history, firing
+  nowhere. `check_deprecated_rules()` verifies the verdicts.
+- **Metrics:** `audit_metrics` from the audit log -- recall hit rate per
+  layer, avg memory-context tokens per turn per layer (chars/4, labeled),
+  estimated input cost per turn/ticket (placeholder rates in policy.yaml,
+  always labeled); `run_retrieval_probes` measures precision@5 on
+  scripted probes (offline). Surfaced by the `report` command. Audit
+  events gained privacy-safe metric fields only (`prompt_chars`,
+  per-layer recall chars/hits, `result_chars`).
 
-**Acceptance:** a "forgetting drill" — aged-out data is provably gone from every store, and
-the eval set still passes.
+**Acceptance:** the forgetting drill (`tests/test_maintenance.py`) --
+aged-out data is seeded into every store, maintenance executes, the data
+is provably gone (old sessions unlisted, old episodes unsearchable,
+expired facts purged, low-confidence facts flagged-not-purged, PII absent
+from the summary), and the eval set still passes (re-run via subprocess).
+A self-skipping integration variant runs the same drill against the real
+Docker backends.
 
 ---
 

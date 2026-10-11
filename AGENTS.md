@@ -1,14 +1,15 @@
 # AGENTS.md — agent-memory-support-agent
 
 ## What this repo is
-Phases 0–3 of ROADMAP.md: the video's e-commerce customer support agent
-rebuilt as a single Google ADK `LlmAgent` on Gemini, with the four memory
-layers (session state, episodic, semantic, procedural) wired through
-ADK-native in-memory services by default and durable Docker backends
-(Redis / pgvector / Firestore / git-versioned rules) via env selection.
-Phase 3 serves it over HTTP: three identical replicas behind nginx.
-Mock Order Management System, mock customers. Runs locally; live turns
-need `GOOGLE_API_KEY`.
+Phases 0–4 of ROADMAP.md (roadmap complete): the video's e-commerce
+customer support agent rebuilt as a single Google ADK `LlmAgent` on
+Gemini, with the four memory layers (session state, episodic, semantic,
+procedural) wired through ADK-native in-memory services by default and
+durable Docker backends (Redis / pgvector / Firestore / git-versioned
+rules) via env selection. Phase 3 serves it over HTTP: three identical
+replicas behind nginx. Phase 4 gives every layer a lifecycle (the
+forgetting layer) plus audit-driven metrics. Mock Order Management
+System, mock customers. Runs locally; live turns need `GOOGLE_API_KEY`.
 
 ## Build / test commands
 ```bash
@@ -40,6 +41,18 @@ inside the compose network only. Select backends via env:
   `git_rules.render_system_prompt()` -- prompt and deterministic rules can
   never drift apart. Rule changes go through git: the history is the audit
   trail. Do not add other `{braces}` to the markdown.
+- `rules/` deprecation (Phase 4): `deprecated_<rule>: true|false` flags in
+  policy.yaml (must name a known rule in `git_rules.KNOWN_RULES`, else
+  startup fails). A deprecated rule returns a `{"deprecated": True,
+  "decision": "not_fired"}` verdict from rules.py (checked first, before
+  any logic) and its `<!-- rule:name -->...<!-- /rule -->` prose block is
+  dropped by `render_system_prompt()` -- it stays readable in git history
+  but stops firing everywhere. `_parse_value` also parses `true`/`false`.
+- `rules/` lifecycle policy (Phase 4, all in policy.yaml, validated):
+  `session_abandon_days`, `episodic_summary_days`, `fact_min_confidence`,
+  `fact_reconfirm_days`, `superseded_retention_days`,
+  `llm_cost_per_mtok_input_usd` / `_output_usd` (placeholders -- replace
+  with real prices; the report always labels cost as estimated).
 - `backends/`: Phase 2, one module per box. `__init__.py` holds only the
   env-selected factories (`make_session_service`, `make_memory_service`,
   `make_semantic_store`, `make_embedder`) with lazy imports -- importing
@@ -98,6 +111,12 @@ inside the compose network only. Select backends via env:
   Prompts/args stored as scrubbed preview + SHA-256 hash of the scrubbed
   text; card numbers redacted to `[REDACTED]` before storage. `replay()`
   re-reads the JSONL to prove the trail is complete and ordered.
+  Phase-4 metric fields (all privacy-safe lengths/counts, never content):
+  `turn` carries `prompt_chars`; `memory_recall` carries per-layer
+  `episodic_chars`/`semantic_chars`/`episodic_hits`/`semantic_hits`;
+  `tool_result` carries `result_chars`. The maintenance `report` command
+  computes hit rates, token estimates (chars/4, always labeled), and
+  estimated input cost from these -- do not log anything more sensitive.
 - Audit wiring: `_recall_before_agent` logs the `turn`; `ensure_memory_recall`
   logs `memory_recall`; `_audit_before_tool`/`_audit_after_tool` log every
   tool invocation/outcome (they never block -- always return None).
@@ -170,5 +189,32 @@ inside the compose network only. Select backends via env:
   `tests/test_phase3_integration.py` (3 offline config checks + 2 live
   LB tests, self-skipping). p95 latency stays a manual check (needs the
   live model + real load).
+- Phase 4 (done 2026-10-11): the forgetting layer. `support_agent/
+  maintenance.py` holds the lifecycle logic + CLI (`python -m
+  support_agent.maintenance report --audit PATH [--precision]` and `run
+  --user U [--layer ...] [--execute]`; dry-run is the default).
+  Sessions: `compact_sessions` deletes sessions idle past
+  `session_abandon_days` (episodic record already captured per-turn).
+  Episodic: `summarize_episodes` rolls episodes older than
+  `episodic_summary_days` into the `episodic_summary` semantic slot via a
+  `Summarizer` (`FakeSummarizer` offline / `GeminiSummarizer` with
+  `SUMMARIZER=gemini`, key from env at call time), then drops the raw
+  rows; needs `EpisodeStore.list_episodes_older_than`/`delete_episode`
+  (pgvector stores only -- the in-memory backend reports unsupported).
+  PII is scrubbed before the summarizer and the summary is refused on a
+  card-pattern match. Semantic: `review_semantic` classifies facts
+  (purge_expired / purge_superseded / flag_low_confidence / flag_stale /
+  flag_conflicted); `apply_semantic_review` executes purges, flags stay
+  drafts for human review (`reconfirm(slot)` is the review path on both
+  semantic stores). `Fact.last_confirmed` (falls back to created_at).
+  Procedural: deprecation flags (above); `check_deprecated_rules()`
+  verifies deprecated rules return not-fired verdicts. Metrics:
+  `audit_metrics` (hit rate per layer, tokens/turn/layer, est. input cost
+  per turn/ticket) and `run_retrieval_probes` (precision@5, offline).
+  `tests/test_maintenance.py`: 22 unit tests + the forgetting drill
+  (seed aged data -> execute -> provably gone -> eval set still passes
+  via subprocess) + 1 self-skipping integration drill for real backends.
+  Money rule and PII discipline hold throughout; maintenance actions are
+  audit-logged (kind "maintenance").
 - When adding a layer, extend the recall block and the eval scenarios,
   not the tool signatures.

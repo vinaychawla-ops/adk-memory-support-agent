@@ -86,10 +86,22 @@ async def ensure_memory_recall(
     if state.get("memory_recall_done"):
         return
     banks = get_banks(app_name, user_id)
-    block = await banks.build_recall_block(query) if banks else ""
+    if banks:
+        block, stats = await banks.build_recall_block_with_stats(query)
+    else:
+        block, stats = "", {
+            "episodic_chars": 0, "semantic_chars": 0,
+            "episodic_hits": 0, "semantic_hits": 0,
+        }
     state["memory_context"] = block
     state["memory_recall_done"] = True
-    log_memory_recall(app_name, user_id, session_id, bool(block), len(block))
+    log_memory_recall(
+        app_name, user_id, session_id, bool(block), len(block),
+        episodic_chars=stats["episodic_chars"],
+        semantic_chars=stats["semantic_chars"],
+        episodic_hits=stats["episodic_hits"],
+        semantic_hits=stats["semantic_hits"],
+    )
 
 
 def _session_ids(ctx) -> tuple[str, str, str | None]:

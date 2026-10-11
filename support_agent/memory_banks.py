@@ -52,6 +52,16 @@ def _today_iso() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _days_between(start_iso: str, end_iso: str) -> int | None:
+    """Whole days between two ISO date/datetime strings; None if unparsable."""
+    try:
+        start = datetime.fromisoformat(start_iso).date()
+        end = datetime.fromisoformat(end_iso).date()
+    except (TypeError, ValueError):
+        return None
+    return (end - start).days
+
+
 def scrub_event(event):
     """Return (event, changed) with card numbers redacted from text parts.
 
@@ -103,6 +113,15 @@ def score_facts(facts: list["Fact"], query: str, limit: int) -> list["Fact"]:
     return [f for _, f in scored[:limit]]
 
 
+def _purgeable_expired(fact: "Fact") -> bool:
+    """True when a fact is expired and not superseded (safe to purge)."""
+    return (
+        bool(fact.expires)
+        and fact.superseded_by is None
+        and not fact.active  # expired, since it is not superseded
+    )
+
+
 @dataclass
 class Fact:
     """One semantic fact: a durable, slot-scoped statement about the customer."""
@@ -114,6 +133,7 @@ class Fact:
     updated_at: str = field(default_factory=_utcnow)
     superseded_by: str | None = None  # text of the newer fact, if superseded
     expires: str | None = None  # optional ISO date; expired facts stop surfacing
+    last_confirmed: str | None = None  # last human/model confirmation (Phase 4)
 
     @property
     def active(self) -> bool:
@@ -122,6 +142,11 @@ class Fact:
         if self.expires and self.expires <= _today_iso():
             return False
         return True
+
+    @property
+    def confirmed_at(self) -> str:
+        """When this fact was last confirmed; falls back to creation time."""
+        return self.last_confirmed or self.created_at
 
 
 class SemanticBank:
@@ -158,7 +183,10 @@ class SemanticBank:
             old.updated_at = _utcnow()
             superseded = True
 
-        self._facts.append(Fact(slot=slot, text=text, confidence=confidence))
+        now = _utcnow()
+        self._facts.append(
+            Fact(slot=slot, text=text, confidence=confidence, last_confirmed=now)
+        )
         return {"stored": True, "slot": slot, "superseded": superseded}
 
     def active_facts(self) -> list[Fact]:
@@ -174,6 +202,53 @@ class SemanticBank:
         Matches on stemmed tokens so "preferences" finds "prefers".
         """
         return score_facts(self.active_facts(), query, limit)
+
+    def purge_expired(self) -> int:
+        """Drop expired, non-superseded facts. Returns the number removed.
+
+        Same semantics as FirestoreSemanticBank.purge_expired: superseded
+        facts stay as the audit trail (their lifecycle is decided by
+        purge_superseded_older_than).
+        """
+        before = len(self._facts)
+        self._facts = [f for f in self._facts if not _purgeable_expired(f)]
+        return before - len(self._facts)
+
+    def purge_superseded_older_than(self, days: int) -> int:
+        """Drop superseded facts whose supersession is older than `days`.
+
+        Returns the number removed. The audit JSONL keeps the full trail,
+        so this only compacts the store.
+        """
+        cutoff = _today_iso()
+        before = len(self._facts)
+        kept = []
+        for f in self._facts:
+            if f.superseded_by is not None:
+                age_days = _days_between(f.updated_at[:10], cutoff)
+                if age_days is not None and age_days > days:
+                    continue
+            kept.append(f)
+        self._facts = kept
+        return before - len(self._facts)
+
+    def reconfirm(self, slot: str) -> dict:
+        """Mark the active fact(s) in `slot` as confirmed now.
+
+        The human-review path for the staleness review: a reviewer confirms
+        a flagged fact instead of the agent auto-purging it.
+        """
+        slot = (slot or "").strip()
+        now = _utcnow()
+        touched = 0
+        for f in self._facts:
+            if f.slot == slot and f.active:
+                f.last_confirmed = now
+                f.updated_at = now
+                touched += 1
+        if not touched:
+            return {"error": f"no active fact in slot {slot!r}"}
+        return {"reconfirmed": True, "slot": slot, "facts": touched}
 
 
 class EpisodicBank:
@@ -259,25 +334,43 @@ class MemoryBanks:
         self.app_name = app_name
         self.user_id = user_id
 
-    async def build_recall_block(self, query: str) -> str:
-        """The text injected into the agent's context at session start."""
+    async def build_recall_block_with_stats(self, query: str) -> tuple[str, dict]:
+        """Recall block plus per-layer stats for the audit log / metrics.
+
+        Returns (block_text, {"episodic_chars", "semantic_chars",
+        "episodic_hits", "semantic_hits"}). Char counts feed the Phase-4
+        maintenance report's token/cost estimates.
+        """
         facts = self.semantic.search(query)
         episodes = await self.episodic.recall(query)
 
+        fact_lines = [f"- [{f.slot}] {f.text}" for f in facts]
         parts: list[str] = []
         if facts:
             parts.append("What I know about this customer (durable facts):")
-            parts.extend(f"- [{f.slot}] {f.text}" for f in facts)
+            parts.extend(fact_lines)
         if episodes:
             parts.append("Relevant past interactions:")
             parts.extend(f"- {line}" for line in episodes)
+        stats = {
+            "episodic_chars": sum(len(line) for line in episodes),
+            "semantic_chars": sum(len(line) for line in fact_lines),
+            "episodic_hits": len(episodes),
+            "semantic_hits": len(facts),
+        }
         if not parts:
-            return ""
-        return (
+            return "", stats
+        block = (
             "MEMORY -- things remembered from earlier conversations. "
             "Use them; do not ask the customer to repeat what is stated here.\n"
             + "\n".join(parts)
         )
+        return block, stats
+
+    async def build_recall_block(self, query: str) -> str:
+        """The text injected into the agent's context at session start."""
+        block, _ = await self.build_recall_block_with_stats(query)
+        return block
 
 
 # --- Registry ---------------------------------------------------------------
